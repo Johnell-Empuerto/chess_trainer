@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:chess_trainer/core/database/app_database.dart';
 import 'package:chess_trainer/features/engine/domain/engine_analysis_result.dart';
 
 class StockfishEngineException implements Exception {
@@ -150,10 +151,9 @@ class StockfishEngineService {
     final executable = await _resolveStockfishExecutable();
     if (executable == null) {
       _startupFuture = null;
-      const message =
-          'Stockfish executable not found. Place stockfish.exe in the project root.';
+      final message = _missingStockfishMessage();
       debugPrint('engine error: $message');
-      throw const StockfishEngineException(message);
+      throw StockfishEngineException(message);
     }
 
     try {
@@ -401,18 +401,27 @@ class StockfishEngineService {
   }
 
   Future<File?> _resolveStockfishExecutable() async {
-    final candidates = [
-      File('stockfish.exe'),
-      File('${Directory.current.path}${Platform.pathSeparator}stockfish.exe'),
-    ];
-
-    for (final candidate in candidates) {
+    for (final candidatePath in AppDatabase.stockfishExecutableCandidatePaths) {
+      final candidate = File(candidatePath);
       if (await candidate.exists()) {
         return candidate.absolute;
       }
     }
 
     return null;
+  }
+
+  String _missingStockfishMessage() {
+    final lines = <String>[
+      'Stockfish executable not found. Checked:',
+      '',
+      for (var i = 0;
+          i < AppDatabase.stockfishExecutableCandidatePaths.length;
+          i++)
+        '${i + 1}. ${AppDatabase.stockfishExecutableCandidatePaths[i]}',
+    ];
+
+    return lines.join('\n');
   }
 
   Future<T> _withTimeout<T>(

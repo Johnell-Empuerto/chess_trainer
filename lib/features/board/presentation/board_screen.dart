@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:chess_trainer/core/chess/game.dart';
+import 'package:chess_trainer/core/chess/move.dart';
+import 'package:chess_trainer/features/board/domain/board_annotation.dart';
 import 'package:chess_trainer/features/board/presentation/widgets/chess_board_view.dart';
 import 'package:chess_trainer/features/board/presentation/widgets/info_panel.dart';
 import 'package:chess_trainer/features/engine/data/stockfish_engine_service.dart';
@@ -21,10 +24,17 @@ class BoardScreen extends StatefulWidget {
 }
 
 class _BoardScreenState extends State<BoardScreen> {
+  static const bool _debugBoard = false;
+
   late Game _game;
+  late final FocusNode _keyboardFocusNode;
   final StockfishEngineService _engineService = StockfishEngineService();
   final OpeningExplorerRepository _explorerRepository =
       OpeningExplorerRepository();
+  final List<String> _fenHistory = [Game.startingFen];
+  final List<MoveRecord> _mainLine = [];
+  final List<BoardArrow> _userArrows = [];
+  final List<BoardCircle> _userCircles = [];
   bool _flipped = false;
   int? _selectedSquare;
   List<int> _legalTargets = [];
@@ -41,11 +51,27 @@ class _BoardScreenState extends State<BoardScreen> {
   int? _activeEngineSearchId;
   String? _activeEngineFen;
   int _engineControlRequestId = 0;
+  int _currentMoveCursor = 0;
+
+  bool get _isAtLatestMove => _currentMoveCursor == _mainLine.length;
+
+  List<String> get _displayedSanMoveHistory {
+    return _mainLine
+        .take(_currentMoveCursor)
+        .map((record) => record.san)
+        .toList(growable: false);
+  }
 
   @override
   void initState() {
     super.initState();
     _game = Game.initial();
+    _keyboardFocusNode = FocusNode(debugLabel: 'Board keyboard navigation');
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _keyboardFocusNode.requestFocus();
+      }
+    });
     _engineSubscription = _engineService.analysisStream.listen(
       _handleEngineUpdate,
       onError: _handleEngineStreamError,
@@ -55,6 +81,7 @@ class _BoardScreenState extends State<BoardScreen> {
   @override
   void dispose() {
     unawaited(_engineSubscription?.cancel());
+    _keyboardFocusNode.dispose();
     _engineService.dispose();
     _explorerRepository.dispose();
     super.dispose();
@@ -66,20 +93,7 @@ class _BoardScreenState extends State<BoardScreen> {
     if (_selectedSquare != null) {
       if (_legalTargets.contains(square)) {
         final fromSquare = _selectedSquare!;
-        final san = _game.playFromTo(_selectedSquare!, square);
-        _debugMoveResult(fromSquare, square, san);
-
-        if (san != null) {
-          setState(() {
-            _clearPositionAnalysis();
-            _lastMoveFrom = fromSquare;
-            _lastMoveTo = square;
-            _selectedSquare = null;
-            _legalTargets = [];
-          });
-          _reanalyzeIfEngineRunning();
-        }
-
+        _playFromTo(fromSquare, square);
         return;
       }
 
@@ -94,10 +108,12 @@ class _BoardScreenState extends State<BoardScreen> {
         return;
       }
 
-      debugPrint(
-        'Move result fail: ${Game.squareName(_selectedSquare!)} to '
-        '${Game.squareName(square)}',
-      );
+      if (_debugBoard) {
+        debugPrint(
+          'Move result fail: ${Game.squareName(_selectedSquare!)} to '
+          '${Game.squareName(square)}',
+        );
+      }
       setState(() {
         _selectedSquare = null;
         _legalTargets = [];
@@ -116,30 +132,21 @@ class _BoardScreenState extends State<BoardScreen> {
   }
 
   void _onPieceDropped(int fromSquare, int toSquare) {
-    final legalMoves = _game.legalMovesFrom(fromSquare);
-
-    debugPrint('Drag drop fromSquare: ${Game.squareName(fromSquare)}');
-    debugPrint('Drag drop toSquare: ${Game.squareName(toSquare)}');
-    debugPrint(
-      'Drag drop legal moves: ${legalMoves.map(Game.squareName).join(', ')}',
-    );
-
-    final san = _game.playFromTo(fromSquare, toSquare);
-    _debugMoveResult(fromSquare, toSquare, san);
-
-    if (san != null) {
-      setState(() {
-        _clearPositionAnalysis();
-        _lastMoveFrom = fromSquare;
-        _lastMoveTo = toSquare;
-        _selectedSquare = null;
-        _legalTargets = [];
-      });
-      _reanalyzeIfEngineRunning();
+    if (_debugBoard) {
+      final legalMoves = _game.legalMovesFrom(fromSquare);
+      debugPrint('Drag drop fromSquare: ${Game.squareName(fromSquare)}');
+      debugPrint('Drag drop toSquare: ${Game.squareName(toSquare)}');
+      debugPrint(
+        'Drag drop legal moves: ${legalMoves.map(Game.squareName).join(', ')}',
+      );
     }
+
+    _playFromTo(fromSquare, toSquare);
   }
 
   void _debugSelection(int square, List<int> legalMoves) {
+    if (!_debugBoard) return;
+
     debugPrint('Selected square: ${Game.squareName(square)}');
     debugPrint(
       'Legal moves from ${Game.squareName(square)}: '
@@ -148,6 +155,8 @@ class _BoardScreenState extends State<BoardScreen> {
   }
 
   void _debugMoveResult(int fromSquare, int toSquare, String? san) {
+    if (!_debugBoard) return;
+
     final fromName = Game.squareName(fromSquare);
     final toName = Game.squareName(toSquare);
 
@@ -158,6 +167,36 @@ class _BoardScreenState extends State<BoardScreen> {
           : 'Move result success: $fromName to $toName ($san)',
     );
     debugPrint('Current FEN after move: ${_game.fen}');
+  }
+
+  void _playFromTo(int fromSquare, int toSquare) {
+    final fenBefore = _game.fen;
+    final moveNumber = _game.moveNumber;
+    final moveColor =
+        _game.turn == Turn.white ? MoveColor.white : MoveColor.black;
+    final san = _game.playFromTo(fromSquare, toSquare);
+    _debugMoveResult(fromSquare, toSquare, san);
+
+    if (san == null) return;
+
+    final uci = _uciFromSquares(fromSquare, toSquare, san);
+
+    setState(() {
+      _clearPositionAnalysis();
+      _recordMove(
+        san: san,
+        uci: uci,
+        fenBefore: fenBefore,
+        fenAfter: _game.fen,
+        moveNumber: moveNumber,
+        color: moveColor,
+      );
+      _lastMoveFrom = fromSquare;
+      _lastMoveTo = toSquare;
+      _selectedSquare = null;
+      _legalTargets = [];
+    });
+    _reanalyzeIfEngineRunning();
   }
 
   void _onExplorerMoveSelected(ExplorerMoveStat moveStat) {
@@ -174,12 +213,24 @@ class _BoardScreenState extends State<BoardScreen> {
       return;
     }
 
+    final fenBefore = _game.fen;
+    final moveNumber = _game.moveNumber;
+    final moveColor =
+        _game.turn == Turn.white ? MoveColor.white : MoveColor.black;
     final san = _game.playUci(moveStat.moveUci);
     _debugMoveResult(fromSquare, toSquare, san);
 
     if (san != null) {
       setState(() {
         _clearPositionAnalysis();
+        _recordMove(
+          san: san,
+          uci: moveStat.moveUci,
+          fenBefore: fenBefore,
+          fenAfter: _game.fen,
+          moveNumber: moveNumber,
+          color: moveColor,
+        );
         _lastMoveFrom = fromSquare;
         _lastMoveTo = toSquare;
         _selectedSquare = null;
@@ -190,29 +241,140 @@ class _BoardScreenState extends State<BoardScreen> {
   }
 
   void _undo() {
-    if (!_game.canUndo) return;
-
-    setState(() {
-      _clearPositionAnalysis();
-      _game.undoMove();
-      _selectedSquare = null;
-      _legalTargets = [];
-      _lastMoveFrom = null;
-      _lastMoveTo = null;
-    });
-    _reanalyzeIfEngineRunning();
+    _goToPreviousMove();
   }
 
   void _reset() {
     setState(() {
       _clearPositionAnalysis();
       _game = Game.initial();
+      _mainLine.clear();
+      _fenHistory
+        ..clear()
+        ..add(Game.startingFen);
+      _currentMoveCursor = 0;
       _selectedSquare = null;
       _legalTargets = [];
       _lastMoveFrom = null;
       _lastMoveTo = null;
+      _clearUserAnnotations(updateState: false);
     });
     _reanalyzeIfEngineRunning();
+  }
+
+  void _recordMove({
+    required String san,
+    required String uci,
+    required String fenBefore,
+    required String fenAfter,
+    required int moveNumber,
+    required MoveColor color,
+  }) {
+    if (!_isAtLatestMove) {
+      _mainLine.removeRange(_currentMoveCursor, _mainLine.length);
+      _fenHistory.removeRange(_currentMoveCursor + 1, _fenHistory.length);
+    }
+
+    final record = MoveRecord(
+      id: _mainLine.length,
+      san: san,
+      uci: uci,
+      fenBefore: fenBefore,
+      fenAfter: fenAfter,
+      moveNumber: moveNumber,
+      color: color,
+      parentId: _mainLine.isEmpty ? null : _mainLine.last.id,
+    );
+
+    _mainLine.add(record);
+    _fenHistory.add(fenAfter);
+    _currentMoveCursor = _mainLine.length;
+  }
+
+  String _uciFromSquares(int fromSquare, int toSquare, String san) {
+    return '${Game.squareName(fromSquare)}${Game.squareName(toSquare)}'
+        '${_promotionFromSan(san) ?? ''}';
+  }
+
+  String? _promotionFromSan(String san) {
+    final match = RegExp(r'=([QRBN])').firstMatch(san);
+    return match?.group(1)?.toLowerCase();
+  }
+
+  void _goToPreviousMove({bool fullMove = false}) {
+    final step = fullMove ? 2 : 1;
+    _goToMoveCursor(math.max(0, _currentMoveCursor - step));
+  }
+
+  void _goToNextMove({bool fullMove = false}) {
+    final step = fullMove ? 2 : 1;
+    _goToMoveCursor(math.min(_mainLine.length, _currentMoveCursor + step));
+  }
+
+  void _goToMoveCursor(int cursor) {
+    final target = cursor.clamp(0, _mainLine.length);
+    if (target == _currentMoveCursor) return;
+
+    setState(() {
+      _clearPositionAnalysis();
+      _currentMoveCursor = target;
+      _game = Game.fromFen(_fenHistory[target]);
+      _selectedSquare = null;
+      _legalTargets = [];
+      _syncLastMoveHighlight();
+    });
+    _reanalyzeIfEngineRunning();
+  }
+
+  void _syncLastMoveHighlight() {
+    if (_currentMoveCursor <= 0) {
+      _lastMoveFrom = null;
+      _lastMoveTo = null;
+      return;
+    }
+
+    final move = _mainLine[_currentMoveCursor - 1];
+    _lastMoveFrom = move.uci.length >= 4
+        ? Game.squareIndex(move.uci.substring(0, 2))
+        : null;
+    _lastMoveTo = move.uci.length >= 4
+        ? Game.squareIndex(move.uci.substring(2, 4))
+        : null;
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+
+    final isControlPressed = HardwareKeyboard.instance.isControlPressed;
+
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      _clearUserAnnotations();
+      return KeyEventResult.handled;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+      _goToPreviousMove(fullMove: isControlPressed);
+      return KeyEventResult.handled;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+      _goToNextMove(fullMove: isControlPressed);
+      return KeyEventResult.handled;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.home) {
+      _goToMoveCursor(0);
+      return KeyEventResult.handled;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.end) {
+      _goToMoveCursor(_mainLine.length);
+      return KeyEventResult.handled;
+    }
+
+    return KeyEventResult.ignored;
   }
 
   Future<void> _startEngine() async {
@@ -372,53 +534,144 @@ class _BoardScreenState extends State<BoardScreen> {
     });
   }
 
+  void _toggleUserArrow(String fromSquare, String toSquare) {
+    if (fromSquare == toSquare) {
+      _toggleUserCircle(fromSquare);
+      return;
+    }
+
+    setState(() {
+      final existingIndex = _userArrows.indexWhere(
+        (arrow) => arrow.matches(fromSquare, toSquare),
+      );
+
+      if (existingIndex >= 0) {
+        _userArrows.removeAt(existingIndex);
+      } else {
+        _userArrows.add(
+          BoardArrow(
+            fromSquare: fromSquare,
+            toSquare: toSquare,
+          ),
+        );
+      }
+    });
+  }
+
+  void _toggleUserCircle(String square) {
+    setState(() {
+      final existingIndex = _userCircles.indexWhere(
+        (circle) => circle.matches(square),
+      );
+
+      if (existingIndex >= 0) {
+        _userCircles.removeAt(existingIndex);
+      } else {
+        _userCircles.add(BoardCircle(square: square));
+      }
+    });
+  }
+
+  void _clearUserAnnotations({bool updateState = true}) {
+    if (_userArrows.isEmpty && _userCircles.isEmpty) return;
+
+    void clear() {
+      _userArrows.clear();
+      _userCircles.clear();
+    }
+
+    if (updateState) {
+      setState(clear);
+    } else {
+      clear();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Training Board'),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Reset Game',
-            onPressed: _reset,
+    return Focus(
+      focusNode: _keyboardFocusNode,
+      autofocus: true,
+      onKeyEvent: _handleKeyEvent,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Training Board'),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => Navigator.of(context).pop(),
           ),
-        ],
-      ),
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final isWide = constraints.maxWidth >= 820;
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Reset Game',
+              onPressed: _reset,
+            ),
+          ],
+        ),
+        body: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final isWide = constraints.maxWidth >= 820;
 
-            if (isWide) {
-              return Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Center(
-                        child: ConstrainedBox(
-                          constraints: BoxConstraints(
-                            maxWidth: _maxBoardWithEvaluationWidth(
-                              constraints,
+              if (isWide) {
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: _maxBoardWithEvaluationWidth(
+                                constraints,
+                              ),
                             ),
+                            child: _buildBoardWithEvaluation(),
                           ),
-                          child: _buildBoardWithEvaluation(),
                         ),
                       ),
                     ),
-                  ),
-                  Expanded(
-                    flex: 2,
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(0, 20, 20, 20),
-                      child: InfoPanel(
+                    Expanded(
+                      flex: 2,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(0, 20, 20, 20),
+                        child: InfoPanel(
+                          game: _game,
+                          engineRunning: _engineRunning,
+                          engineStarting: _engineStarting,
+                          isEngineThinking: _isAnalyzing,
+                          engineResult: _engineResult,
+                          engineError: _engineError,
+                          explorerRepository: _explorerRepository,
+                          moveHistory: _mainLine,
+                          currentMoveCursor: _currentMoveCursor,
+                          isAtLatestMove: _isAtLatestMove,
+                          displayedSanMoveHistory: _displayedSanMoveHistory,
+                          onExplorerMoveSelected: _onExplorerMoveSelected,
+                          onMoveHistorySelected: _goToMoveCursor,
+                          onUndo: _undo,
+                          onReset: _reset,
+                          onFlip: _flip,
+                          onStartEngine: _startEngine,
+                          onStopEngine: _stopEngine,
+                          onClearAnalysis: _clearAnalysis,
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              }
+
+              return SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      _buildBoardWithEvaluation(),
+                      const SizedBox(height: 16),
+                      InfoPanel(
                         game: _game,
                         engineRunning: _engineRunning,
                         engineStarting: _engineStarting,
@@ -426,7 +679,12 @@ class _BoardScreenState extends State<BoardScreen> {
                         engineResult: _engineResult,
                         engineError: _engineError,
                         explorerRepository: _explorerRepository,
+                        moveHistory: _mainLine,
+                        currentMoveCursor: _currentMoveCursor,
+                        isAtLatestMove: _isAtLatestMove,
+                        displayedSanMoveHistory: _displayedSanMoveHistory,
                         onExplorerMoveSelected: _onExplorerMoveSelected,
+                        onMoveHistorySelected: _goToMoveCursor,
                         onUndo: _undo,
                         onReset: _reset,
                         onFlip: _flip,
@@ -434,40 +692,12 @@ class _BoardScreenState extends State<BoardScreen> {
                         onStopEngine: _stopEngine,
                         onClearAnalysis: _clearAnalysis,
                       ),
-                    ),
+                    ],
                   ),
-                ],
-              );
-            }
-
-            return SingleChildScrollView(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    _buildBoardWithEvaluation(),
-                    const SizedBox(height: 16),
-                    InfoPanel(
-                      game: _game,
-                      engineRunning: _engineRunning,
-                      engineStarting: _engineStarting,
-                      isEngineThinking: _isAnalyzing,
-                      engineResult: _engineResult,
-                      engineError: _engineError,
-                      explorerRepository: _explorerRepository,
-                      onExplorerMoveSelected: _onExplorerMoveSelected,
-                      onUndo: _undo,
-                      onReset: _reset,
-                      onFlip: _flip,
-                      onStartEngine: _startEngine,
-                      onStopEngine: _stopEngine,
-                      onClearAnalysis: _clearAnalysis,
-                    ),
-                  ],
                 ),
-              ),
-            );
-          },
+              );
+            },
+          ),
         ),
       ),
     );
@@ -485,8 +715,12 @@ class _BoardScreenState extends State<BoardScreen> {
       bestMoveTo: _bestMoveTo,
       checkedKingSquare: _game.checkedKingSquareName,
       isCheckmate: _game.isCheckmate,
+      userArrows: _userArrows,
+      userCircles: _userCircles,
       onSquareTap: _onSquareTap,
       onPieceDropped: _onPieceDropped,
+      onUserArrowDrawn: _toggleUserArrow,
+      onUserCircleDrawn: _toggleUserCircle,
     );
   }
 

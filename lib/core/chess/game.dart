@@ -42,6 +42,7 @@ class Game {
   int get moveNumber => _chess.move_number;
   String get fen => _chess.fen;
   String get turnColor => turn.displayName.toLowerCase();
+  List<String> get sanMoveHistory => _chess.getHistory().cast<String>();
 
   String? get checkedKingSquareName {
     if (!isCheck && !isCheckmate) return null;

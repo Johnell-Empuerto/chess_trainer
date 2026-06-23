@@ -23,13 +23,11 @@ stockfish.exe
 stockfish*.exe
 
 chessdatabase/*.pgn
-chessdatabase/*.pgn.bz2
 chessdatabase/*.sqlite
 chessdatabase/*.sqlite-shm
 chessdatabase/*.sqlite-wal
 
 *.pgn
-*.pgn.bz2
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

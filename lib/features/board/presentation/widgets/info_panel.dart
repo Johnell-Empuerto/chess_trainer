@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:chess_trainer/app/app_theme.dart';
 import 'package:chess_trainer/core/chess/game.dart';
+import 'package:chess_trainer/core/chess/move.dart';
 import 'package:chess_trainer/features/engine/domain/engine_analysis_result.dart';
 import 'package:chess_trainer/features/engine/presentation/widgets/analysis_lines_panel.dart';
 import 'package:chess_trainer/features/explorer/data/opening_explorer_repository.dart';
@@ -18,7 +19,12 @@ class InfoPanel extends StatefulWidget {
   final EngineAnalysisResult? engineResult;
   final String? engineError;
   final OpeningExplorerRepository explorerRepository;
+  final List<MoveRecord> moveHistory;
+  final int currentMoveCursor;
+  final bool isAtLatestMove;
+  final List<String> displayedSanMoveHistory;
   final ValueChanged<ExplorerMoveStat> onExplorerMoveSelected;
+  final ValueChanged<int> onMoveHistorySelected;
   final VoidCallback onUndo;
   final VoidCallback onReset;
   final VoidCallback onFlip;
@@ -35,7 +41,12 @@ class InfoPanel extends StatefulWidget {
     required this.engineResult,
     required this.engineError,
     required this.explorerRepository,
+    required this.moveHistory,
+    required this.currentMoveCursor,
+    required this.isAtLatestMove,
+    required this.displayedSanMoveHistory,
     required this.onExplorerMoveSelected,
+    required this.onMoveHistorySelected,
     required this.onUndo,
     required this.onReset,
     required this.onFlip,
@@ -82,6 +93,7 @@ class _InfoPanelState extends State<InfoPanel> {
                   : ExplorerPanel(
                       key: const ValueKey('explore-tab'),
                       currentFen: widget.game.fen,
+                      sanMoveHistory: widget.displayedSanMoveHistory,
                       engineResult: widget.engineResult,
                       repository: widget.explorerRepository,
                       onMoveSelected: widget.onExplorerMoveSelected,
@@ -94,23 +106,47 @@ class _InfoPanelState extends State<InfoPanel> {
   }
 
   Widget _buildHeader() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          'Turn: ${widget.game.turn.displayName}',
-          style: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-          ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'Turn: ${widget.game.turn.displayName}',
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            Text(
+              'Move: ${widget.game.moveNumber}',
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
         ),
-        Text(
-          'Move: ${widget.game.moveNumber}',
-          style: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
+        if (!widget.isAtLatestMove) ...[
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: const Color(0x2434D399),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0x5534D399)),
+            ),
+            child: Text(
+              _cursorStatusText(),
+              style: const TextStyle(
+                color: Color(0xFF34D399),
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -139,7 +175,11 @@ class _InfoPanelState extends State<InfoPanel> {
           ),
         ],
         const SizedBox(height: 16),
-        _MoveHistoryTable(game: widget.game),
+        _MoveHistoryTable(
+          moveHistory: widget.moveHistory,
+          currentMoveCursor: widget.currentMoveCursor,
+          onMoveSelected: widget.onMoveHistorySelected,
+        ),
         const SizedBox(height: 16),
         Row(
           children: [
@@ -179,6 +219,18 @@ class _InfoPanelState extends State<InfoPanel> {
       return '${widget.game.turn.displayName} is in check';
     }
     return '';
+  }
+
+  String _cursorStatusText() {
+    final cursor = widget.currentMoveCursor;
+    if (cursor == 0) {
+      return 'Viewing starting position';
+    }
+
+    final move = widget.moveHistory[cursor - 1];
+    final marker =
+        move.isWhiteMove ? '${move.moveNumber}.' : '${move.moveNumber}...';
+    return 'Viewing move $marker ${move.san}';
   }
 
   Widget _buildEngineSection() {
@@ -481,13 +533,19 @@ class _EngineDetailRow extends StatelessWidget {
 }
 
 class _MoveHistoryTable extends StatelessWidget {
-  final Game game;
+  final List<MoveRecord> moveHistory;
+  final int currentMoveCursor;
+  final ValueChanged<int> onMoveSelected;
 
-  const _MoveHistoryTable({required this.game});
+  const _MoveHistoryTable({
+    required this.moveHistory,
+    required this.currentMoveCursor,
+    required this.onMoveSelected,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final entries = game.moveHistoryEntries;
+    final rows = _moveRows();
 
     return Container(
       decoration: BoxDecoration(
@@ -502,7 +560,7 @@ class _MoveHistoryTable extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Text(
-              'Starting Position',
+              'Main Line',
               style: TextStyle(
                 color: AppTheme.textPrimary,
                 fontSize: 14,
@@ -513,15 +571,16 @@ class _MoveHistoryTable extends StatelessWidget {
           const Divider(height: 1),
           ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 240),
-            child: entries.isEmpty
+            child: rows.isEmpty
                 ? const SizedBox(height: 8)
                 : ListView.builder(
                     shrinkWrap: true,
-                    itemCount: entries.length,
+                    itemCount: rows.length,
                     itemBuilder: (context, index) {
                       return _MoveHistoryRow(
-                        entry: entries[index],
-                        isLatest: index == entries.length - 1,
+                        row: rows[index],
+                        currentMoveCursor: currentMoveCursor,
+                        onMoveSelected: onMoveSelected,
                       );
                     },
                   ),
@@ -530,21 +589,59 @@ class _MoveHistoryTable extends StatelessWidget {
       ),
     );
   }
+
+  List<_MoveHistoryRowData> _moveRows() {
+    final rows = <_MoveHistoryRowData>[];
+
+    for (var i = 0; i < moveHistory.length; i++) {
+      final move = moveHistory[i];
+
+      if (move.isWhiteMove || rows.isEmpty) {
+        rows.add(
+          _MoveHistoryRowData(
+            moveNumber: move.moveNumber,
+            whiteMove: move.isWhiteMove ? move : null,
+            whiteCursor: move.isWhiteMove ? i + 1 : null,
+            blackMove: move.isBlackMove ? move : null,
+            blackCursor: move.isBlackMove ? i + 1 : null,
+          ),
+        );
+        continue;
+      }
+
+      final lastRow = rows.removeLast();
+      rows.add(
+        lastRow.copyWith(
+          blackMove: move,
+          blackCursor: i + 1,
+        ),
+      );
+    }
+
+    return rows;
+  }
 }
 
 class _MoveHistoryRow extends StatelessWidget {
-  final MoveHistoryEntry entry;
-  final bool isLatest;
+  final _MoveHistoryRowData row;
+  final int currentMoveCursor;
+  final ValueChanged<int> onMoveSelected;
 
   const _MoveHistoryRow({
-    required this.entry,
-    required this.isLatest,
+    required this.row,
+    required this.currentMoveCursor,
+    required this.onMoveSelected,
   });
 
   @override
   Widget build(BuildContext context) {
+    final whiteCursor = row.whiteCursor;
+    final blackCursor = row.blackCursor;
+    final isActiveRow =
+        currentMoveCursor == whiteCursor || currentMoveCursor == blackCursor;
+
     return ColoredBox(
-      color: isLatest ? const Color(0x2434D399) : Colors.transparent,
+      color: isActiveRow ? const Color(0x1434D399) : Colors.transparent,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
         child: Row(
@@ -552,7 +649,7 @@ class _MoveHistoryRow extends StatelessWidget {
             SizedBox(
               width: 34,
               child: Text(
-                '${entry.moveNumber}.',
+                '${row.moveNumber}.',
                 style: TextStyle(
                   color: AppTheme.textSecondary,
                   fontWeight: FontWeight.w700,
@@ -561,23 +658,91 @@ class _MoveHistoryRow extends StatelessWidget {
               ),
             ),
             Expanded(
-              child: _SanMoveText(
-                san: entry.whiteSan,
-                isWhiteMove: true,
-              ),
+              child: row.whiteMove == null || whiteCursor == null
+                  ? const SizedBox.shrink()
+                  : _MoveHistoryCell(
+                      move: row.whiteMove!,
+                      cursor: whiteCursor,
+                      isSelected: currentMoveCursor == whiteCursor,
+                      onMoveSelected: onMoveSelected,
+                    ),
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: entry.blackSan == null
+              child: row.blackMove == null || blackCursor == null
                   ? const SizedBox.shrink()
-                  : _SanMoveText(
-                      san: entry.blackSan!,
-                      isWhiteMove: false,
+                  : _MoveHistoryCell(
+                      move: row.blackMove!,
+                      cursor: blackCursor,
+                      isSelected: currentMoveCursor == blackCursor,
+                      onMoveSelected: onMoveSelected,
                     ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _MoveHistoryCell extends StatelessWidget {
+  final MoveRecord move;
+  final int cursor;
+  final bool isSelected;
+  final ValueChanged<int> onMoveSelected;
+
+  const _MoveHistoryCell({
+    required this.move,
+    required this.cursor,
+    required this.isSelected,
+    required this.onMoveSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: isSelected ? const Color(0x2434D399) : Colors.transparent,
+      borderRadius: BorderRadius.circular(6),
+      child: InkWell(
+        onTap: () => onMoveSelected(cursor),
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          child: _SanMoveText(
+            san: move.san,
+            isWhiteMove: move.isWhiteMove,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MoveHistoryRowData {
+  final int moveNumber;
+  final MoveRecord? whiteMove;
+  final int? whiteCursor;
+  final MoveRecord? blackMove;
+  final int? blackCursor;
+
+  const _MoveHistoryRowData({
+    required this.moveNumber,
+    required this.whiteMove,
+    required this.whiteCursor,
+    required this.blackMove,
+    required this.blackCursor,
+  });
+
+  _MoveHistoryRowData copyWith({
+    MoveRecord? blackMove,
+    int? blackCursor,
+  }) {
+    return _MoveHistoryRowData(
+      moveNumber: moveNumber,
+      whiteMove: whiteMove,
+      whiteCursor: whiteCursor,
+      blackMove: blackMove ?? this.blackMove,
+      blackCursor: blackCursor ?? this.blackCursor,
     );
   }
 }

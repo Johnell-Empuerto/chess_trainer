@@ -60,3 +60,35 @@ int squareIndex(String name) {
 
 // Private helper used by Move.
 String _squareName(int index) => squareName(index);
+
+enum MoveColor {
+  white,
+  black,
+}
+
+class MoveRecord {
+  final int id;
+  final String san;
+  final String uci;
+  final String fenBefore;
+  final String fenAfter;
+  final int moveNumber;
+  final MoveColor color;
+  final int? parentId;
+  final List<int> children;
+
+  const MoveRecord({
+    required this.id,
+    required this.san,
+    required this.uci,
+    required this.fenBefore,
+    required this.fenAfter,
+    required this.moveNumber,
+    required this.color,
+    this.parentId,
+    this.children = const [],
+  });
+
+  bool get isWhiteMove => color == MoveColor.white;
+  bool get isBlackMove => color == MoveColor.black;
+}

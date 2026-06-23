@@ -235,9 +235,9 @@ class _ResultBar extends StatelessWidget {
         const SizedBox(height: 4),
         Row(
           children: [
-            Expanded(child: _PercentText(white)),
-            Expanded(child: _PercentText(draw)),
-            Expanded(child: _PercentText(black)),
+            Expanded(child: _PercentText(label: 'W', value: white)),
+            Expanded(child: _PercentText(label: 'D', value: draw)),
+            Expanded(child: _PercentText(label: 'B', value: black)),
           ],
         ),
       ],
@@ -268,14 +268,18 @@ class _HeaderText extends StatelessWidget {
 }
 
 class _PercentText extends StatelessWidget {
+  final String label;
   final double value;
 
-  const _PercentText(this.value);
+  const _PercentText({
+    required this.label,
+    required this.value,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Text(
-      '${(value * 100).round()}%',
+      '$label ${(value * 100).round()}%',
       textAlign: TextAlign.center,
       style: TextStyle(
         color: AppTheme.textMuted,
