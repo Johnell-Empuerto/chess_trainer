@@ -114,6 +114,32 @@ class Game {
     return san;
   }
 
+  PlayedMoveResult? playSan(String san) {
+    final move = _matchingSanMove(san);
+    if (move == null) return null;
+
+    final fromName = move['from'] as String;
+    final toName = move['to'] as String;
+    final resolvedSan = move['san'] as String;
+    final promotion = _promotionFromSan(san) ?? _promotionFromSan(resolvedSan);
+    final success = _playMoveMap(fromName, toName, promotion);
+
+    if (!success) return null;
+
+    _syncFromRules();
+
+    final fromSquare = squareIndex(fromName);
+    final toSquare = squareIndex(toName);
+    if (fromSquare == null || toSquare == null) return null;
+
+    return PlayedMoveResult(
+      san: resolvedSan,
+      uci: '$fromName$toName${promotion ?? ''}',
+      fromSquare: fromSquare,
+      toSquare: toSquare,
+    );
+  }
+
   List<int> legalMovesFrom(int square) {
     if (!_isValidSquare(square)) return [];
 
@@ -203,6 +229,38 @@ class Game {
     );
   }
 
+  Map<String, dynamic>? _matchingSanMove(String san) {
+    final cleanedSan = _normalizeSanForMatch(san);
+    final moves = _chess.moves({'verbose': true}).cast<Map<String, dynamic>>();
+
+    for (final move in moves) {
+      if ((move['san'] as String).trim() == san.trim()) {
+        return move;
+      }
+    }
+
+    for (final move in moves) {
+      if (_normalizeSanForMatch(move['san'] as String) == cleanedSan) {
+        return move;
+      }
+    }
+
+    return null;
+  }
+
+  String _normalizeSanForMatch(String san) {
+    return san
+        .trim()
+        .replaceAll('0-0-0', 'O-O-O')
+        .replaceAll('0-0', 'O-O')
+        .replaceAll(RegExp(r'[+#?!]'), '');
+  }
+
+  String? _promotionFromSan(String san) {
+    final match = RegExp(r'=([QRBN])').firstMatch(san);
+    return match?.group(1)?.toLowerCase();
+  }
+
   List<String> _formattedMoveHistory() {
     return _moveHistoryEntries().map((entry) => entry.displayText).toList();
   }
@@ -249,6 +307,12 @@ class Game {
     return (8 - rank) * 8 + file;
   }
 
+  static String? fenValidationError(String fen) {
+    final result = rules.Chess.validate_fen(fen);
+    if (result['valid'] == true) return null;
+    return result['error'] as String? ?? 'Invalid FEN.';
+  }
+
   static bool _isValidSquare(int square) {
     return square >= 0 && square < 64;
   }
@@ -275,6 +339,20 @@ class Game {
         return '';
     }
   }
+}
+
+class PlayedMoveResult {
+  final String san;
+  final String uci;
+  final int fromSquare;
+  final int toSquare;
+
+  const PlayedMoveResult({
+    required this.san,
+    required this.uci,
+    required this.fromSquare,
+    required this.toSquare,
+  });
 }
 
 class MoveHistoryEntry {

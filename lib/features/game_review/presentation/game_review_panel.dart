@@ -13,9 +13,11 @@ class GameReviewPanel extends StatefulWidget {
   final Map<String, MoveNode> moveTree;
   final List<String> mainLineNodeIds;
   final GameReviewService reviewService;
+  final String gameFingerprint;
   final String? currentNodeId;
   final String? openingName;
   final String? result;
+  final int autoRunRequestId;
   final ValueChanged<String> onMoveSelected;
   final ValueChanged<GameMoveReview?>? onReviewMoveChanged;
 
@@ -24,9 +26,11 @@ class GameReviewPanel extends StatefulWidget {
     required this.moveTree,
     required this.mainLineNodeIds,
     required this.reviewService,
+    required this.gameFingerprint,
     this.currentNodeId,
     this.openingName,
     this.result,
+    this.autoRunRequestId = 0,
     required this.onMoveSelected,
     this.onReviewMoveChanged,
   });
@@ -41,20 +45,34 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
   String? _error;
   GameMoveReview? _selectedMove;
   final ScrollController _timelineScrollController = ScrollController();
+  int _handledAutoRunRequestId = 0;
 
   @override
   void initState() {
     super.initState();
     _notifyReviewMove(null);
+    _maybeAutoRunReview();
   }
 
   @override
   void didUpdateWidget(covariant GameReviewPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
 
+    if (oldWidget.gameFingerprint != widget.gameFingerprint) {
+      setState(() {
+        _report = null;
+        _loading = false;
+        _error = null;
+        _selectedMove = null;
+      });
+      _notifyReviewMove(null);
+    }
+
     if (oldWidget.currentNodeId != widget.currentNodeId && _report != null) {
       _syncSelectedMoveWithCurrentNode();
     }
+
+    _maybeAutoRunReview();
   }
 
   @override
@@ -185,6 +203,17 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       widget.onReviewMoveChanged?.call(move);
+    });
+  }
+
+  void _maybeAutoRunReview() {
+    final requestId = widget.autoRunRequestId;
+    if (requestId <= 0 || requestId == _handledAutoRunRequestId) return;
+    _handledAutoRunRequestId = requestId;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _loading) return;
+      unawaited(_runReview());
     });
   }
 

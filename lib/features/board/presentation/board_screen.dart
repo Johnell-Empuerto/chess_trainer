@@ -20,6 +20,9 @@ import 'package:chess_trainer/features/engine/presentation/widgets/evaluation_ba
 import 'package:chess_trainer/features/explorer/data/opening_explorer_repository.dart';
 import 'package:chess_trainer/features/explorer/data/opening_name_service.dart';
 import 'package:chess_trainer/features/explorer/domain/explorer_move_stat.dart';
+import 'package:chess_trainer/features/import_game/data/pgn_import_service.dart';
+import 'package:chess_trainer/features/import_game/domain/imported_game.dart';
+import 'package:chess_trainer/features/import_game/presentation/import_game_dialog.dart';
 
 /// Interactive chess board screen.
 class BoardScreen extends StatefulWidget {
@@ -42,6 +45,7 @@ class _BoardScreenState extends State<BoardScreen> {
     _engineService,
   );
   final AiExplainerService _aiService = AiExplainerService();
+  final PgnImportService _pgnImportService = PgnImportService();
   final Map<String, MoveNode> _moveTree = {
     MoveNode.rootId: MoveNode.root(Game.startingFen),
   };
@@ -75,6 +79,10 @@ class _BoardScreenState extends State<BoardScreen> {
   int _engineControlRequestId = 0;
   int _computerRequestId = 0;
   int _hintRequestId = 0;
+  int _showGameReviewRequestId = 0;
+  int _autoGameReviewRequestId = 0;
+  String? _importedGameResult;
+  String? _importedOpeningName;
   String? _computerActiveNodeId;
   int _nextMoveNodeId = 0;
   String _currentNodeId = MoveNode.rootId;
@@ -301,6 +309,7 @@ class _BoardScreenState extends State<BoardScreen> {
       _clearPositionAnalysis();
       _clearHintInState();
       _clearReviewOverlayInState();
+      _clearImportedGameMetadataInState();
       _commitPlayedMove(
         san: san,
         uci: uci,
@@ -348,6 +357,7 @@ class _BoardScreenState extends State<BoardScreen> {
         _clearPositionAnalysis();
         _clearHintInState();
         _clearReviewOverlayInState();
+        _clearImportedGameMetadataInState();
         _commitPlayedMove(
           san: san,
           uci: moveStat.moveUci,
@@ -377,6 +387,8 @@ class _BoardScreenState extends State<BoardScreen> {
       _clearPositionAnalysis();
       _stopComputerGameInState();
       _clearReviewOverlayInState();
+      _coachService.invalidateCache();
+      _clearImportedGameMetadataInState();
       _game = Game.initial();
       _moveTree
         ..clear()
@@ -396,6 +408,184 @@ class _BoardScreenState extends State<BoardScreen> {
       unawaited(_engineService.cancelCurrentSearch());
     }
     _reanalyzeIfEngineRunning();
+  }
+
+  Future<void> _showImportGameDialog() async {
+    final result = await showDialog<ImportGameDialogResult>(
+      context: context,
+      builder: (context) => const ImportGameDialog(),
+    );
+
+    if (result == null || !mounted) return;
+
+    await _importGameFromPgn(
+      result.pgnText,
+      requestComputerAnalysis: result.requestComputerAnalysis,
+    );
+  }
+
+  Future<void> _importGameFromPgn(
+    String pgnText, {
+    required bool requestComputerAnalysis,
+  }) async {
+    try {
+      final imported = _pgnImportService.parse(pgnText);
+      _validateImportedVariant(imported);
+      final importResult = _buildImportedGameState(imported);
+      final wasComputerModeActive = _computerMode != ComputerPlayMode.off;
+
+      setState(() {
+        _clearPositionAnalysis();
+        _stopComputerGameInState();
+        _clearReviewOverlayInState();
+        _coachService.invalidateCache();
+        _game = importResult.game;
+        _moveTree
+          ..clear()
+          ..addAll(importResult.moveTree);
+        _currentNodeId = importResult.currentNodeId;
+        _mainLineLeafId = importResult.currentNodeId;
+        _nextMoveNodeId = importResult.nextMoveNodeId;
+        _selectedSquare = null;
+        _legalTargets = [];
+        _lastMoveFrom = importResult.lastMoveFrom;
+        _lastMoveTo = importResult.lastMoveTo;
+        _importedGameResult = imported.result;
+        _importedOpeningName = imported.opening;
+        _clearUserAnnotations(updateState: false);
+
+        if (requestComputerAnalysis) {
+          _showGameReviewRequestId++;
+          _autoGameReviewRequestId++;
+        }
+      });
+
+      if (wasComputerModeActive) {
+        unawaited(_engineService.cancelCurrentSearch());
+      }
+
+      if (!requestComputerAnalysis) {
+        _reanalyzeIfEngineRunning();
+      }
+
+      _showImportMessage(
+        requestComputerAnalysis
+            ? 'Game imported. Full Game Review is starting.'
+            : 'Game imported.',
+      );
+    } on PgnImportException catch (error) {
+      _showImportMessage(error.message, isError: true);
+    } catch (error) {
+      _showImportMessage('PGN could not be loaded: $error', isError: true);
+    }
+  }
+
+  void _validateImportedVariant(ImportedGame imported) {
+    final variant = imported.variant?.trim();
+    if (variant == null || variant.isEmpty) return;
+
+    final normalized = variant.toLowerCase();
+    const supportedVariants = {'standard', 'chess', 'from position'};
+    if (!supportedVariants.contains(normalized)) {
+      throw PgnImportException(
+        'Unsupported PGN variant "$variant". Only standard chess PGNs are supported.',
+      );
+    }
+  }
+
+  _ImportedGameState _buildImportedGameState(ImportedGame imported) {
+    final startingFen = imported.startingFen?.trim();
+    final initialFen = startingFen == null || startingFen.isEmpty
+        ? Game.startingFen
+        : startingFen;
+    final fenError = Game.fenValidationError(initialFen);
+    if (fenError != null) {
+      throw PgnImportException('Could not import starting FEN: $fenError');
+    }
+
+    final workingGame = initialFen == Game.startingFen
+        ? Game.initial()
+        : Game.fromFen(initialFen);
+    final importedTree = <String, MoveNode>{
+      MoveNode.rootId: MoveNode.root(initialFen),
+    };
+    var currentNodeId = MoveNode.rootId;
+    var nextMoveNodeId = 0;
+    int? lastMoveFrom;
+    int? lastMoveTo;
+
+    for (var i = 0; i < imported.sanMoves.length; i++) {
+      final san = imported.sanMoves[i];
+      final fenBefore = workingGame.fen;
+      final moveNumber = workingGame.moveNumber;
+      final moveColor =
+          workingGame.turn == Turn.white ? MoveColor.white : MoveColor.black;
+      final playedMove = workingGame.playSan(san);
+
+      if (playedMove == null) {
+        final marker = _importMoveMarker(
+          moveNumber: moveNumber,
+          color: moveColor,
+          san: san,
+        );
+        throw PgnImportException(
+          'Could not import move $marker. The PGN may be invalid or unsupported.',
+        );
+      }
+
+      final nodeId = 'm${++nextMoveNodeId}';
+      final node = MoveNode(
+        id: nodeId,
+        parentId: currentNodeId,
+        san: playedMove.san,
+        uci: playedMove.uci,
+        fenBefore: fenBefore,
+        fenAfter: workingGame.fen,
+        moveNumber: moveNumber,
+        color: moveColor,
+        isMainLine: true,
+      );
+
+      importedTree[nodeId] = node;
+      importedTree[currentNodeId]?.childIds.add(nodeId);
+      currentNodeId = nodeId;
+      lastMoveFrom = playedMove.fromSquare;
+      lastMoveTo = playedMove.toSquare;
+    }
+
+    if (currentNodeId == MoveNode.rootId) {
+      throw const PgnImportException('No legal moves were found in this PGN.');
+    }
+
+    return _ImportedGameState(
+      game: workingGame,
+      moveTree: importedTree,
+      currentNodeId: currentNodeId,
+      nextMoveNodeId: nextMoveNodeId,
+      lastMoveFrom: lastMoveFrom,
+      lastMoveTo: lastMoveTo,
+    );
+  }
+
+  String _importMoveMarker({
+    required int moveNumber,
+    required MoveColor color,
+    required String san,
+  }) {
+    return color == MoveColor.white
+        ? '$moveNumber. $san'
+        : '$moveNumber...$san';
+  }
+
+  void _showImportMessage(String message, {bool isError = false}) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? Colors.redAccent.shade700 : null,
+      ),
+    );
   }
 
   Future<void> _showPlayComputerDialog() async {
@@ -509,6 +699,11 @@ class _BoardScreenState extends State<BoardScreen> {
     _hintResult = null;
   }
 
+  void _clearImportedGameMetadataInState() {
+    _importedGameResult = null;
+    _importedOpeningName = null;
+  }
+
   void _maybeStartComputerMove() {
     if (!_shouldComputerMoveNow) return;
 
@@ -592,6 +787,7 @@ class _BoardScreenState extends State<BoardScreen> {
       _clearPositionAnalysis();
       _clearHintInState();
       _clearReviewOverlayInState();
+      _clearImportedGameMetadataInState();
       _commitPlayedMove(
         san: san,
         uci: uci,
@@ -1108,6 +1304,14 @@ class _BoardScreenState extends State<BoardScreen> {
             onPressed: () => Navigator.of(context).pop(),
           ),
           actions: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: TextButton.icon(
+                onPressed: _showImportGameDialog,
+                icon: const Icon(Icons.upload_file),
+                label: const Text('Import Game'),
+              ),
+            ),
             IconButton(
               icon: const Icon(Icons.refresh),
               tooltip: 'Reset Game',
@@ -1168,6 +1372,8 @@ class _BoardScreenState extends State<BoardScreen> {
                           mainLineNodeIds: _mainLineNodeIds,
                           isAtMainLineEnd: _isAtMainLineEnd,
                           displayedSanMoveHistory: _displayedSanMoveHistory,
+                          importedGameResult: _importedGameResult,
+                          importedOpeningName: _importedOpeningName,
                           onExplorerMoveSelected: _onExplorerMoveSelected,
                           onMoveSelected: _goToMoveNode,
                           onUndo: _undo,
@@ -1180,6 +1386,8 @@ class _BoardScreenState extends State<BoardScreen> {
                           onStopComputerGame: _stopComputerGame,
                           onRequestComputerHint: _requestComputerHint,
                           onReviewOverlayChanged: _setReviewOverlay,
+                          showGameReviewRequestId: _showGameReviewRequestId,
+                          autoGameReviewRequestId: _autoGameReviewRequestId,
                         ),
                       ),
                     ),
@@ -1218,6 +1426,8 @@ class _BoardScreenState extends State<BoardScreen> {
                         mainLineNodeIds: _mainLineNodeIds,
                         isAtMainLineEnd: _isAtMainLineEnd,
                         displayedSanMoveHistory: _displayedSanMoveHistory,
+                        importedGameResult: _importedGameResult,
+                        importedOpeningName: _importedOpeningName,
                         onExplorerMoveSelected: _onExplorerMoveSelected,
                         onMoveSelected: _goToMoveNode,
                         onUndo: _undo,
@@ -1230,6 +1440,8 @@ class _BoardScreenState extends State<BoardScreen> {
                         onStopComputerGame: _stopComputerGame,
                         onRequestComputerHint: _requestComputerHint,
                         onReviewOverlayChanged: _setReviewOverlay,
+                        showGameReviewRequestId: _showGameReviewRequestId,
+                        autoGameReviewRequestId: _autoGameReviewRequestId,
                       ),
                     ],
                   ),
@@ -1318,4 +1530,22 @@ class _BoardScreenState extends State<BoardScreen> {
     if (!constraints.maxHeight.isFinite) return constraints.maxWidth;
     return math.max(260.0, constraints.maxHeight - 40 + sideUiWidth);
   }
+}
+
+class _ImportedGameState {
+  final Game game;
+  final Map<String, MoveNode> moveTree;
+  final String currentNodeId;
+  final int nextMoveNodeId;
+  final int? lastMoveFrom;
+  final int? lastMoveTo;
+
+  const _ImportedGameState({
+    required this.game,
+    required this.moveTree,
+    required this.currentNodeId,
+    required this.nextMoveNodeId,
+    required this.lastMoveFrom,
+    required this.lastMoveTo,
+  });
 }

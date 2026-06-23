@@ -50,6 +50,8 @@ class InfoPanel extends StatefulWidget {
   final List<String> mainLineNodeIds;
   final bool isAtMainLineEnd;
   final List<String> displayedSanMoveHistory;
+  final String? importedGameResult;
+  final String? importedOpeningName;
   final ValueChanged<ExplorerMoveStat> onExplorerMoveSelected;
   final ValueChanged<String> onMoveSelected;
   final VoidCallback onUndo;
@@ -62,6 +64,8 @@ class InfoPanel extends StatefulWidget {
   final VoidCallback onStopComputerGame;
   final VoidCallback onRequestComputerHint;
   final ValueChanged<BoardReviewOverlay?> onReviewOverlayChanged;
+  final int showGameReviewRequestId;
+  final int autoGameReviewRequestId;
 
   const InfoPanel({
     super.key,
@@ -88,6 +92,8 @@ class InfoPanel extends StatefulWidget {
     required this.mainLineNodeIds,
     required this.isAtMainLineEnd,
     required this.displayedSanMoveHistory,
+    this.importedGameResult,
+    this.importedOpeningName,
     required this.onExplorerMoveSelected,
     required this.onMoveSelected,
     required this.onUndo,
@@ -100,6 +106,8 @@ class InfoPanel extends StatefulWidget {
     required this.onStopComputerGame,
     required this.onRequestComputerHint,
     required this.onReviewOverlayChanged,
+    required this.showGameReviewRequestId,
+    required this.autoGameReviewRequestId,
   });
 
   @override
@@ -112,6 +120,22 @@ class _InfoPanelState extends State<InfoPanel> {
     coachService: widget.coachService,
     aiService: widget.aiService,
   );
+
+  @override
+  void didUpdateWidget(covariant InfoPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    final shouldOpenGameReview =
+        oldWidget.showGameReviewRequestId != widget.showGameReviewRequestId ||
+            oldWidget.autoGameReviewRequestId != widget.autoGameReviewRequestId;
+
+    if (shouldOpenGameReview && _selectedTab != _InfoPanelTab.gameReview) {
+      setState(() {
+        _selectedTab = _InfoPanelTab.gameReview;
+      });
+      _notifyReviewOverlay(null);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -460,15 +484,18 @@ class _InfoPanelState extends State<InfoPanel> {
         sanMoveHistory: widget.displayedSanMoveHistory,
       ),
       builder: (context, snapshot) {
-        final openingName = snapshot.data?.displayName;
+        final openingName =
+            snapshot.data?.displayName ?? widget.importedOpeningName;
         return GameReviewPanel(
           key: const ValueKey('game-review-tab'),
           moveTree: widget.moveTree,
           mainLineNodeIds: widget.mainLineNodeIds,
           reviewService: _gameReviewService,
+          gameFingerprint: _gameReviewFingerprint(),
           currentNodeId: widget.currentNodeId,
           openingName: openingName,
           result: _gameResultText(),
+          autoRunRequestId: widget.autoGameReviewRequestId,
           onMoveSelected: widget.onMoveSelected,
           onReviewMoveChanged: (move) {
             _notifyReviewOverlay(_overlayForGameMove(move));
@@ -476,6 +503,12 @@ class _InfoPanelState extends State<InfoPanel> {
         );
       },
     );
+  }
+
+  String _gameReviewFingerprint() {
+    return widget.mainLineNodeIds
+        .map((nodeId) => widget.moveTree[nodeId]?.fenAfter ?? nodeId)
+        .join('|');
   }
 
   void _notifyReviewOverlay(BoardReviewOverlay? overlay) {
@@ -651,7 +684,7 @@ class _InfoPanelState extends State<InfoPanel> {
       return '$winner wins by checkmate';
     }
     if (widget.game.isStalemate) return 'Draw by stalemate';
-    return '';
+    return widget.importedGameResult ?? '';
   }
 
   String? _resolveOpeningName(MoveNode node) {
