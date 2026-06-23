@@ -34,6 +34,7 @@ enum ReviewAnnotationType {
   blunder,
   mistake,
   inaccuracy,
+  miss,
   good,
   brilliant,
   checkmate,
@@ -49,6 +50,8 @@ extension ReviewAnnotationTypeStyle on ReviewAnnotationType {
         return const Color(0xDCF97316);
       case ReviewAnnotationType.inaccuracy:
         return const Color(0xDCF59E0B);
+      case ReviewAnnotationType.miss:
+        return const Color(0xDC60A5FA);
       case ReviewAnnotationType.good:
         return const Color(0xDC34D399);
       case ReviewAnnotationType.brilliant:

@@ -186,6 +186,12 @@ class _ImportGameDialogState extends State<ImportGameDialog> {
           label: const Text('Import Game'),
           style: ElevatedButton.styleFrom(
             backgroundColor: AppTheme.primary,
+            foregroundColor: Colors.white,
+            minimumSize: const Size(136, 44),
+            textStyle: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w800,
+            ),
           ),
         ),
       ],

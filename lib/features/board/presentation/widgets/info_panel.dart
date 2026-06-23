@@ -22,6 +22,7 @@ import 'package:chess_trainer/features/explorer/domain/opening_name.dart';
 import 'package:chess_trainer/features/explorer/presentation/explorer_panel.dart';
 import 'package:chess_trainer/features/game_review/data/game_review_service.dart';
 import 'package:chess_trainer/features/game_review/domain/game_move_review.dart';
+import 'package:chess_trainer/features/game_review/domain/game_review_report.dart';
 import 'package:chess_trainer/features/game_review/presentation/game_review_panel.dart';
 
 enum _InfoPanelTab { analysis, explore, review, gameReview }
@@ -118,12 +119,26 @@ class _InfoPanelState extends State<InfoPanel> {
   _InfoPanelTab _selectedTab = _InfoPanelTab.analysis;
   late final GameReviewService _gameReviewService = GameReviewService(
     coachService: widget.coachService,
+    explorerRepository: widget.explorerRepository,
     aiService: widget.aiService,
   );
+  GameReviewReport? _cachedGameReviewReport;
+  String? _cachedGameReviewFingerprint;
+  String? _selectedGameReviewNodeId;
 
   @override
   void didUpdateWidget(covariant InfoPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+
+    final currentFingerprint = _gameReviewFingerprint();
+    if (_cachedGameReviewReport != null &&
+        _cachedGameReviewFingerprint != null &&
+        _cachedGameReviewFingerprint != currentFingerprint) {
+      _cachedGameReviewReport = null;
+      _cachedGameReviewFingerprint = null;
+      _selectedGameReviewNodeId = null;
+      _notifyReviewOverlay(null);
+    }
 
     final shouldOpenGameReview =
         oldWidget.showGameReviewRequestId != widget.showGameReviewRequestId ||
@@ -496,9 +511,17 @@ class _InfoPanelState extends State<InfoPanel> {
           openingName: openingName,
           result: _gameResultText(),
           autoRunRequestId: widget.autoGameReviewRequestId,
+          initialReport: _cachedGameReviewReport,
+          initialSelectedNodeId: _selectedGameReviewNodeId,
           onMoveSelected: widget.onMoveSelected,
           onReviewMoveChanged: (move) {
             _notifyReviewOverlay(_overlayForGameMove(move));
+          },
+          onReviewStateChanged: (report, selectedNodeId) {
+            _cachedGameReviewReport = report;
+            _selectedGameReviewNodeId = selectedNodeId;
+            _cachedGameReviewFingerprint =
+                report == null ? null : _gameReviewFingerprint();
           },
         );
       },
@@ -636,6 +659,8 @@ class _InfoPanelState extends State<InfoPanel> {
         return ReviewAnnotationType.brilliant;
       case MoveQuality.excellent:
         return ReviewAnnotationType.good;
+      case MoveQuality.miss:
+        return ReviewAnnotationType.miss;
       case MoveQuality.inaccuracy:
         return ReviewAnnotationType.inaccuracy;
       case MoveQuality.mistake:
@@ -660,6 +685,8 @@ class _InfoPanelState extends State<InfoPanel> {
         return '!!';
       case MoveQuality.excellent:
         return '!';
+      case MoveQuality.miss:
+        return '!!?';
       case MoveQuality.inaccuracy:
         return '?!';
       case MoveQuality.mistake:
@@ -674,6 +701,7 @@ class _InfoPanelState extends State<InfoPanel> {
   bool _shouldShowSuggestion(MoveQuality quality, bool isCheckmateMove) {
     if (isCheckmateMove || quality == MoveQuality.checkmate) return false;
     return quality == MoveQuality.blunder ||
+        quality == MoveQuality.miss ||
         quality == MoveQuality.mistake ||
         quality == MoveQuality.inaccuracy;
   }

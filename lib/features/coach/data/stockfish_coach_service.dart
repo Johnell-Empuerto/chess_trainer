@@ -10,6 +10,19 @@ import 'package:chess_trainer/features/coach/domain/move_quality.dart';
 import 'package:chess_trainer/features/engine/data/stockfish_engine_service.dart';
 import 'package:chess_trainer/features/engine/domain/engine_analysis_result.dart';
 
+String normalizeSanForCompare(String san) {
+  return san
+      .trim()
+      .replaceAll('0-0-0', 'O-O-O')
+      .replaceAll('0-0', 'O-O')
+      .replaceAll(RegExp(r'[+#?!]'), '')
+      .replaceAll(RegExp(r'\s+'), '');
+}
+
+String normalizeUciForCompare(String uci) {
+  return uci.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
+}
+
 class StockfishCoachService {
   final StockfishEngineService _engine;
   final Map<String, CoachMoveReview> _cache = {};
@@ -79,29 +92,47 @@ class StockfishCoachService {
         resultAfter.mateIn,
         isWhiteMove,
       );
+      final missedForcedMate =
+          !isCheckmateMove && mateBefore > 0 && mateAfter <= 0;
+      final allowsForcedMate =
+          !isCheckmateMove && mateAfter < 0 && mateBefore >= 0;
       final mateDescription = isCheckmateMove
           ? 'delivers checkmate'
           : _mateDescription(
               mateBefore: mateBefore,
               mateAfter: mateAfter,
             );
-      final isMateBlunder = isCheckmateMove
-          ? false
-          : _isMateBlunder(
-              mateBefore: mateBefore,
-              mateAfter: mateAfter,
-            );
+      final isMateBlunder = allowsForcedMate;
       final bestEvalAtPosition = _bestEvalForPosition(resultBefore);
       final playedEvalAfter = _scoreForComparison(resultAfter);
       final evalLoss = isWhiteMove
           ? (bestEvalAtPosition - playedEvalAfter)
           : (playedEvalAfter - bestEvalAtPosition);
-      final displayEvalLoss = isCheckmateMove
+      final moverEvalBefore =
+          isWhiteMove ? bestEvalAtPosition : -bestEvalAtPosition;
+      final moverEvalAfter = isWhiteMove ? playedEvalAfter : -playedEvalAfter;
+      final missReason = _missReason(
+        playedMatchesBest: playedMatchesBest,
+        isCheckmateMove: isCheckmateMove,
+        isMateBlunder: isMateBlunder,
+        playedSan: playedSan,
+        bestMoveSan: bestMoveSan,
+        mateBefore: mateBefore,
+        mateAfter: mateAfter,
+        evalLoss: evalLoss,
+        moverEvalBefore: moverEvalBefore,
+        moverEvalAfter: moverEvalAfter,
+      );
+      final isMiss = missReason != null;
+      final displayEvalLoss = isCheckmateMove ||
+              playedMatchesBest ||
+              (missedForcedMate && !isMateBlunder)
           ? 0.0
           : _displayEvalLoss(
               rawLoss: evalLoss,
               hasMateScore: hasMateScore,
               isMateBlunder: isMateBlunder,
+              missedForcedMate: missedForcedMate,
             );
       final evalSwing = _evalSwingForMover(
         evalBefore: evalBefore,
@@ -116,12 +147,14 @@ class StockfishCoachService {
               evalLoss: displayEvalLoss,
               evalSwing: evalSwing,
               isBestMove: playedMatchesBest,
-              bestMoveUci: bestMoveUci,
               hasMateScore: hasMateScore,
               isMateBlunder: isMateBlunder,
+              isMiss: isMiss,
               mateBefore: mateBefore,
               mateAfter: mateAfter,
               isOpeningPhase: isOpeningPhase,
+              moverEvalBefore: moverEvalBefore,
+              moverEvalAfter: moverEvalAfter,
             );
 
       final displayedBestMove =
@@ -135,6 +168,7 @@ class StockfishCoachService {
         isBestMove: playedMatchesBest,
         isCheckmateMove: isCheckmateMove,
         mateDescription: mateDescription,
+        missReason: missReason,
       );
 
       final review = CoachMoveReview(
@@ -157,6 +191,9 @@ class StockfishCoachService {
         isCheckmateMove: isCheckmateMove,
         mateDescription: mateDescription,
         isOpeningPhase: isOpeningPhase,
+        playedMatchesBest: playedMatchesBest,
+        isMiss: isMiss,
+        missReason: missReason,
       );
 
       _cache[cacheKey] = review;
@@ -276,8 +313,10 @@ class StockfishCoachService {
     required double rawLoss,
     required bool hasMateScore,
     required bool isMateBlunder,
+    required bool missedForcedMate,
   }) {
     if (isMateBlunder) return 9.99;
+    if (missedForcedMate) return 0.0;
     final loss = math.max(0.0, rawLoss);
     if (hasMateScore) return loss.clamp(0.0, 9.99).toDouble();
     return loss.clamp(0.0, 9.99).toDouble();
@@ -298,17 +337,13 @@ class StockfishCoachService {
     return moverHasMate ? 1 : -1;
   }
 
-  bool _isMateBlunder({
-    required int mateBefore,
-    required int mateAfter,
-  }) {
-    return mateAfter < 0 && mateBefore >= 0 || mateBefore > 0 && mateAfter <= 0;
-  }
-
   String? _mateDescription({
     required int mateBefore,
     required int mateAfter,
   }) {
+    if (mateBefore > 0 && mateAfter < 0) {
+      return 'missed forced mate and allows a forced mate';
+    }
     if (mateBefore > 0 && mateAfter <= 0) {
       return 'missed forced mate';
     }
@@ -352,20 +387,25 @@ class StockfishCoachService {
     required String bestMoveUci,
     required String bestMoveSan,
   }) {
-    if (bestMoveUci.isNotEmpty &&
-        playedUci.toLowerCase() == bestMoveUci.toLowerCase()) {
+    final normalizedPlayedUci = normalizeUciForCompare(playedUci);
+    final normalizedBestUci = normalizeUciForCompare(bestMoveUci);
+    if (_hasUsableBestMove(normalizedBestUci) &&
+        normalizedPlayedUci == normalizedBestUci) {
       return true;
     }
 
-    return _normalizeSan(playedSan) == _normalizeSan(bestMoveSan);
+    final normalizedPlayedSan = normalizeSanForCompare(playedSan);
+    final normalizedBestSan = normalizeSanForCompare(bestMoveSan);
+    return normalizedPlayedSan.isNotEmpty &&
+        normalizedBestSan.isNotEmpty &&
+        normalizedPlayedSan == normalizedBestSan;
   }
 
-  String _normalizeSan(String san) {
-    return san
-        .trim()
-        .replaceAll('0-0-0', 'O-O-O')
-        .replaceAll('0-0', 'O-O')
-        .replaceAll(RegExp(r'[+#?!]'), '');
+  bool _hasUsableBestMove(String bestMoveUci) {
+    return bestMoveUci.isNotEmpty &&
+        bestMoveUci != 'none' &&
+        bestMoveUci != '(none)' &&
+        bestMoveUci != '0000';
   }
 
   bool _isWhiteMove(String fen) {
@@ -377,14 +417,16 @@ class StockfishCoachService {
     required double evalLoss,
     required double evalSwing,
     required bool isBestMove,
-    required String bestMoveUci,
     required bool hasMateScore,
     required bool isMateBlunder,
+    required bool isMiss,
     required int mateBefore,
     required int mateAfter,
     required bool isOpeningPhase,
+    required double moverEvalBefore,
+    required double moverEvalAfter,
   }) {
-    if (isBestMove && bestMoveUci.isNotEmpty) {
+    if (isBestMove) {
       if ((hasMateScore && mateAfter > 0 && !isMateBlunder) ||
           evalSwing >= 2.0) {
         return MoveQuality.brilliant;
@@ -392,13 +434,32 @@ class StockfishCoachService {
       return MoveQuality.excellent;
     }
 
-    if (isMateBlunder) return MoveQuality.blunder;
+    if (isMateBlunder) {
+      return moverEvalBefore <= -6.0
+          ? MoveQuality.mistake
+          : MoveQuality.blunder;
+    }
+
+    if (isMiss) return MoveQuality.miss;
 
     if (hasMateScore && mateBefore < 0 && mateAfter >= 0) {
       return MoveQuality.brilliant;
     }
 
     final loss = math.max(0.0, evalLoss);
+
+    if (moverEvalBefore <= -6.0) {
+      if (loss >= 4.0) return MoveQuality.mistake;
+      if (loss >= 1.5) return MoveQuality.inaccuracy;
+      return MoveQuality.good;
+    }
+
+    if (moverEvalBefore <= -3.0) {
+      if (loss >= 4.0) return MoveQuality.mistake;
+      if (loss >= 1.5) return MoveQuality.inaccuracy;
+      return MoveQuality.good;
+    }
+
     if (isOpeningPhase) {
       if (loss > 2.50) return MoveQuality.blunder;
       if (loss >= 1.20) return MoveQuality.mistake;
@@ -406,11 +467,58 @@ class StockfishCoachService {
       return MoveQuality.good;
     }
 
-    if (loss > 2.00) return MoveQuality.blunder;
-    if (loss >= 0.90) return MoveQuality.mistake;
+    if (moverEvalBefore >= 2.5) {
+      if (moverEvalAfter < 0.5 && loss >= 2.5) {
+        return MoveQuality.blunder;
+      }
+      if (loss >= 1.2) return MoveQuality.mistake;
+      if (loss >= 0.6) return MoveQuality.inaccuracy;
+      return MoveQuality.good;
+    }
+
+    if (loss >= 2.50) return MoveQuality.blunder;
+    if (loss >= 1.00) return MoveQuality.mistake;
     if (loss >= 0.35) return MoveQuality.inaccuracy;
 
     return MoveQuality.good;
+  }
+
+  String? _missReason({
+    required bool playedMatchesBest,
+    required bool isCheckmateMove,
+    required bool isMateBlunder,
+    required String playedSan,
+    required String bestMoveSan,
+    required int mateBefore,
+    required int mateAfter,
+    required double evalLoss,
+    required double moverEvalBefore,
+    required double moverEvalAfter,
+  }) {
+    if (playedMatchesBest || isCheckmateMove || isMateBlunder) return null;
+
+    if (mateBefore > 0 && mateAfter <= 0) {
+      return 'missed forced mate';
+    }
+
+    if (_isMateSan(bestMoveSan) && !_isMateSan(playedSan)) {
+      return 'missed forced mate';
+    }
+
+    final loss = math.max(0.0, evalLoss);
+    if (loss >= 3.0 && moverEvalBefore >= 2.0 && moverEvalAfter > -0.5) {
+      return 'missed a major tactical opportunity';
+    }
+
+    if (loss >= 2.0 && moverEvalBefore >= 1.0 && moverEvalAfter >= 0.0) {
+      return 'missed a stronger chance to win material or increase pressure';
+    }
+
+    if (loss >= 3.5 && moverEvalBefore >= -1.0 && moverEvalAfter >= -2.0) {
+      return 'missed a chance to punish the opponent';
+    }
+
+    return null;
   }
 
   bool _isOpeningPhase(MoveNode moveNode, String? openingName) {
@@ -427,7 +535,12 @@ class StockfishCoachService {
     required bool isBestMove,
     required bool isCheckmateMove,
     String? mateDescription,
+    String? missReason,
   }) {
+    if (isBestMove && !isCheckmateMove) {
+      return '$playedSan is the engine\'s preferred move. It keeps your position strong and wins or maintains material safely.';
+    }
+
     final mateText =
         mateDescription == null ? '' : ' This involves a $mateDescription.';
     switch (quality) {
@@ -437,6 +550,12 @@ class StockfishCoachService {
         return '$playedSan is a brilliant move! It finds a forcing idea and gives you a clear advantage.$mateText Keep looking for tactics, checks, captures, and threats.';
       case MoveQuality.excellent:
         return '$playedSan is a strong move. It keeps your position healthy and improves your pieces without creating weaknesses.$mateText';
+      case MoveQuality.miss:
+        final bestText =
+            bestMoveDisplay.isNotEmpty ? bestMoveDisplay : 'the best move';
+        final reasonText =
+            missReason == null ? 'missed a major opportunity' : missReason;
+        return 'You had a big opportunity here. Your move was playable, but $bestText would have punished the opponent immediately. Missed opportunity: $reasonText. Lesson: always check forcing moves - checks, captures, and threats.';
       case MoveQuality.good:
         return '$playedSan is a solid move. It maintains a stable position without significant disadvantage. Focus on developing pieces and controlling the center.';
       case MoveQuality.inaccuracy:

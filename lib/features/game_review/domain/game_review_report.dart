@@ -5,6 +5,7 @@ class PlayerStats {
   final int bestCount;
   final int excellentCount;
   final int goodCount;
+  final int missCount;
   final int inaccuracyCount;
   final int mistakeCount;
   final int blunderCount;
@@ -16,6 +17,7 @@ class PlayerStats {
     required this.bestCount,
     required this.excellentCount,
     required this.goodCount,
+    required this.missCount,
     required this.inaccuracyCount,
     required this.mistakeCount,
     required this.blunderCount,
@@ -23,7 +25,8 @@ class PlayerStats {
     required this.totalEvalLoss,
   });
 
-  bool get hasIssues => inaccuracyCount + mistakeCount + blunderCount > 0;
+  bool get hasIssues =>
+      missCount + inaccuracyCount + mistakeCount + blunderCount > 0;
 }
 
 class GameReviewReport {

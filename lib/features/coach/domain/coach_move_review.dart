@@ -22,6 +22,9 @@ class CoachMoveReview {
   final bool isCheckmateMove;
   final String? mateDescription;
   final bool isOpeningPhase;
+  final bool playedMatchesBest;
+  final bool isMiss;
+  final String? missReason;
   final String? error;
 
   const CoachMoveReview({
@@ -46,9 +49,12 @@ class CoachMoveReview {
     this.isCheckmateMove = false,
     this.mateDescription,
     this.isOpeningPhase = false,
+    this.playedMatchesBest = false,
+    this.isMiss = false,
+    this.missReason,
     this.error,
   });
 
-  bool get isBestMove => (evalLoss ?? 999) < 0.01;
+  bool get isBestMove => playedMatchesBest || (evalLoss ?? 999) < 0.01;
   bool get hasError => error != null;
 }

@@ -4,6 +4,7 @@ enum MoveQuality {
   checkmate,
   brilliant,
   excellent,
+  miss,
   good,
   inaccuracy,
   mistake,
@@ -19,6 +20,8 @@ extension MoveQualityLabel on MoveQuality {
         return 'Brilliant';
       case MoveQuality.excellent:
         return 'Excellent';
+      case MoveQuality.miss:
+        return 'Miss';
       case MoveQuality.good:
         return 'Good';
       case MoveQuality.inaccuracy:
@@ -38,6 +41,8 @@ extension MoveQualityLabel on MoveQuality {
         return const Color(0xFF8B5CF6);
       case MoveQuality.excellent:
         return const Color(0xFF34D399);
+      case MoveQuality.miss:
+        return const Color(0xFF60A5FA);
       case MoveQuality.good:
         return const Color(0xFF6B7280);
       case MoveQuality.inaccuracy:
@@ -57,6 +62,8 @@ extension MoveQualityLabel on MoveQuality {
         return '!!';
       case MoveQuality.excellent:
         return '!';
+      case MoveQuality.miss:
+        return '!!?';
       case MoveQuality.good:
         return '';
       case MoveQuality.inaccuracy:

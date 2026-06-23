@@ -18,8 +18,12 @@ class GameReviewPanel extends StatefulWidget {
   final String? openingName;
   final String? result;
   final int autoRunRequestId;
+  final GameReviewReport? initialReport;
+  final String? initialSelectedNodeId;
   final ValueChanged<String> onMoveSelected;
   final ValueChanged<GameMoveReview?>? onReviewMoveChanged;
+  final void Function(GameReviewReport? report, String? selectedNodeId)?
+      onReviewStateChanged;
 
   const GameReviewPanel({
     super.key,
@@ -31,8 +35,11 @@ class GameReviewPanel extends StatefulWidget {
     this.openingName,
     this.result,
     this.autoRunRequestId = 0,
+    this.initialReport,
+    this.initialSelectedNodeId,
     required this.onMoveSelected,
     this.onReviewMoveChanged,
+    this.onReviewStateChanged,
   });
 
   @override
@@ -50,7 +57,13 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
   @override
   void initState() {
     super.initState();
-    _notifyReviewMove(null);
+    _report = widget.initialReport;
+    if (_report != null && widget.autoRunRequestId > 0) {
+      _handledAutoRunRequestId = widget.autoRunRequestId;
+    }
+    _selectedMove = _report == null ? null : _restoredSelectedMove(_report!);
+    _notifyReviewMove(_selectedMove);
+    _notifyReviewStateChanged();
     _maybeAutoRunReview();
   }
 
@@ -66,6 +79,19 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
         _selectedMove = null;
       });
       _notifyReviewMove(null);
+      _notifyReviewStateChanged();
+      return;
+    }
+
+    if (_report == null && widget.initialReport != null) {
+      setState(() {
+        _report = widget.initialReport;
+        _loading = false;
+        _error = null;
+        _selectedMove = _restoredSelectedMove(widget.initialReport!);
+      });
+      _notifyReviewMove(_selectedMove);
+      _notifyReviewStateChanged();
     }
 
     if (oldWidget.currentNodeId != widget.currentNodeId && _report != null) {
@@ -91,6 +117,7 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
       _selectedMove = null;
     });
     _notifyReviewMove(null);
+    _notifyReviewStateChanged();
 
     try {
       final report = await widget.reviewService.reviewGame(
@@ -108,15 +135,20 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
           _error = 'No moves to review. Play some moves first.';
         });
         _notifyReviewMove(null);
+        _notifyReviewStateChanged();
         return;
       }
 
       setState(() {
         _report = report;
-        _selectedMove = _initialSelectedMove(report);
+        _selectedMove = _initialTeachingMove(report);
         _loading = false;
       });
       _notifyReviewMove(_selectedMove);
+      _notifyReviewStateChanged();
+      if (_selectedMove != null) {
+        widget.onMoveSelected(_selectedMove!.nodeId);
+      }
       _scrollTimelineToMove(_selectedMove);
     } catch (e) {
       if (!mounted) return;
@@ -125,6 +157,7 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
         _error = e.toString();
       });
       _notifyReviewMove(null);
+      _notifyReviewStateChanged();
     }
   }
 
@@ -133,15 +166,41 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
     _scrollTimelineToMove(move);
     widget.onMoveSelected(move.nodeId);
     _notifyReviewMove(move);
+    _notifyReviewStateChanged();
   }
 
-  GameMoveReview? _initialSelectedMove(GameReviewReport report) {
+  GameMoveReview? _restoredSelectedMove(GameReviewReport report) {
     if (widget.currentNodeId == MoveNode.rootId) return null;
 
     return _moveForNode(report, widget.currentNodeId) ??
+        _moveForNode(report, widget.initialSelectedNodeId) ??
+        _initialTeachingMove(report);
+  }
+
+  GameMoveReview? _initialTeachingMove(GameReviewReport report) {
+    if (report.moves.isEmpty) return null;
+
+    GameMoveReview? firstWhere(bool Function(GameMoveReview move) test) {
+      for (final move in report.moves) {
+        if (test(move)) return move;
+      }
+      return null;
+    }
+
+    return firstWhere((move) => move.quality == MoveQuality.blunder) ??
+        firstWhere((move) => move.quality == MoveQuality.mistake) ??
+        firstWhere(
+          (move) => move.isMiss || move.quality == MoveQuality.miss,
+        ) ??
+        firstWhere(
+          (move) =>
+              move.quality == MoveQuality.inaccuracy &&
+              move.displayEvalLoss >= 0.5,
+        ) ??
         (report.criticalMoments.isNotEmpty
             ? report.criticalMoments.first
-            : report.moves.first);
+            : null) ??
+        report.moves.first;
   }
 
   GameMoveReview? _moveForNode(GameReviewReport report, String? nodeId) {
@@ -165,6 +224,7 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
         _selectedMove = null;
       });
       _notifyReviewMove(null);
+      _notifyReviewStateChanged();
       return;
     }
     if (move.nodeId == _selectedMove?.nodeId) return;
@@ -174,6 +234,7 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
     });
     _scrollTimelineToMove(move);
     _notifyReviewMove(move);
+    _notifyReviewStateChanged();
   }
 
   void _scrollTimelineToMove(GameMoveReview? move) {
@@ -206,10 +267,18 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
     });
   }
 
+  void _notifyReviewStateChanged() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      widget.onReviewStateChanged?.call(_report, _selectedMove?.nodeId);
+    });
+  }
+
   void _maybeAutoRunReview() {
     final requestId = widget.autoRunRequestId;
     if (requestId <= 0 || requestId == _handledAutoRunRequestId) return;
     _handledAutoRunRequestId = requestId;
+    if (_report != null) return;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _loading) return;
@@ -421,7 +490,7 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
             ),
             const SizedBox(height: 4),
             Text(
-              '${stats.blunderCount}B ${stats.mistakeCount}M ${stats.inaccuracyCount}I',
+              '${stats.blunderCount}B ${stats.mistakeCount}M ${stats.missCount}Miss ${stats.inaccuracyCount}I',
               style: TextStyle(
                 color: color.withAlpha(180),
                 fontSize: 11,
@@ -600,6 +669,8 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
             _detailRow('PV', move.pvLine.take(4).join(' ')),
           if (move.openingName != null && move.openingName!.isNotEmpty)
             _detailRow('Opening', move.openingName!),
+          if (move.bookMoveSource != null)
+            _detailRow('Database', _databaseMoveStats(move)),
           if (move.openingMoveNote != null)
             _detailRow('Opening note', move.openingMoveNote!),
           const SizedBox(height: 8),
@@ -877,6 +948,9 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
     if (move.mateDescription != null && move.mateDescription!.isNotEmpty) {
       return move.mateDescription!;
     }
+    if (move.isMiss || move.quality == MoveQuality.miss) {
+      return move.missReason ?? 'missed opportunity';
+    }
 
     return '${move.displayEvalLoss.toStringAsFixed(1)} pawns';
   }
@@ -889,6 +963,8 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
         return Icons.star;
       case MoveQuality.excellent:
         return Icons.check_circle;
+      case MoveQuality.miss:
+        return Icons.lightbulb_outline;
       case MoveQuality.good:
         return Icons.remove_circle_outline;
       case MoveQuality.inaccuracy:
@@ -902,6 +978,18 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
 
   String _explanationForMove(GameMoveReview move) {
     if (move.isCheckmateMove) return _checkmateExplanation(move);
+
+    if (move.isBookMove) {
+      return _compactExplanationForMove(move);
+    }
+
+    if (move.playedMatchesBest) {
+      return 'Why it works: ${move.playedSan} is the engine\'s preferred move. It keeps your position strong and follows the best line.';
+    }
+
+    if (move.isMiss || move.quality == MoveQuality.miss) {
+      return _missExplanation(move);
+    }
 
     if (!move.shouldShowDetailedInsight) {
       return _compactExplanationForMove(move);
@@ -924,17 +1012,19 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
         return '${move.playedSan} is a brilliant move! It finds the strongest idea available. The engine confirms this is the best continuation, giving you a clear advantage.';
       case MoveQuality.excellent:
         return '${move.playedSan} is an excellent move. It follows the engine\'s recommendation and improves your position without creating weaknesses.';
+      case MoveQuality.miss:
+        return _missExplanation(move);
       case MoveQuality.good:
         return _compactExplanationForMove(move);
       case MoveQuality.inaccuracy:
-        return 'What went wrong: ${move.playedSan} was playable but slightly imprecise. Better move: $best. Lesson: compare your candidate move with the opponent\'s most forcing reply before choosing. ${_lossSentence(move)}';
+        return '${_databaseCautionPrefix(move)}What was slightly wrong: ${move.playedSan} was playable but imprecise. Better move: $best. Lesson: compare your candidate move with the opponent\'s most forcing reply before choosing. ${_lossSentence(move)}';
       case MoveQuality.mistake:
-        return 'What went wrong: ${move.playedSan} gives the opponent a clearer chance to improve. Better move: $best. Lesson: before attacking or capturing, check whether your piece can be challenged with tempo. ${_lossSentence(move)}';
+        return '${_databaseCautionPrefix(move)}What went wrong: ${move.playedSan} gives the opponent a clearer chance to improve. Better move: $best. Lesson: before attacking or capturing, check whether your piece can be challenged with tempo. ${_lossSentence(move)}';
       case MoveQuality.blunder:
         if (move.mateDescription != null) {
-          return 'What went wrong: ${move.playedSan} ${move.mateDescription}. Better move: $best. Lesson: in sharp positions, check forcing moves for both sides before playing a natural-looking move.';
+          return '${_databaseCautionPrefix(move)}What went wrong: ${move.playedSan} ${move.mateDescription}. Better move: $best. Lesson: in sharp positions, check forcing moves for both sides before playing a natural-looking move.';
         }
-        return 'What went wrong: ${move.playedSan} changes the game sharply in your opponent\'s favor. Better move: $best. Lesson: look for loose pieces, direct tactics, and king-safety problems before moving. ${_lossSentence(move)}';
+        return '${_databaseCautionPrefix(move)}What was lost: ${move.playedSan} changes the game sharply in your opponent\'s favor. Better move: $best. Lesson: look for loose pieces, direct tactics, and king-safety problems before moving. ${_lossSentence(move)}';
     }
   }
 
@@ -942,10 +1032,20 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
     return '${move.playedSan} is the winning move. It ends the game immediately by checkmate, so there is no better continuation. Lesson: always look for forcing moves - checks, captures, and threats - especially near the enemy king.';
   }
 
+  String _missExplanation(GameMoveReview move) {
+    final best = move.bestMoveSan.isNotEmpty
+        ? move.bestMoveSan
+        : (move.bestMoveUci.isNotEmpty ? move.bestMoveUci : 'The engine move');
+    final reason = move.missReason;
+    final reasonSentence =
+        reason == null || reason.isEmpty ? '' : ' Engine note: $reason.';
+    return 'Missed opportunity: $best was much stronger because it won material, forced mate, or punished the opponent.$reasonSentence Lesson: Always check forcing moves: checks, captures, and threats.';
+  }
+
   String _compactExplanationForMove(GameMoveReview move) {
     if (move.isBookMove) {
       return move.openingMoveNote ??
-          'This is playable opening theory, even if Stockfish slightly prefers another move.';
+          'This is a book opening move. It appears in the explorer database and follows known opening theory.';
     }
 
     if (move.quality == MoveQuality.good) {
@@ -963,6 +1063,35 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
     return 'Evaluation loss: ${move.displayEvalLoss.toStringAsFixed(1)} pawns.';
   }
 
+  String _databaseMoveStats(GameMoveReview move) {
+    final games = move.bookMoveGames;
+    final source = move.bookMoveSource ?? 'explorer';
+    final parts = <String>[
+      source,
+      if (games != null) '$games games',
+    ];
+
+    final white = move.bookMoveWhiteWinRate;
+    final draw = move.bookMoveDrawRate;
+    final black = move.bookMoveBlackWinRate;
+    if (white != null && draw != null && black != null) {
+      parts.add(
+        'W ${_formatRate(white)} / D ${_formatRate(draw)} / B ${_formatRate(black)}',
+      );
+    }
+
+    return parts.join(' - ');
+  }
+
+  String _formatRate(double rate) {
+    return '${(rate * 100).round()}%';
+  }
+
+  String _databaseCautionPrefix(GameMoveReview move) {
+    if (!move.isDatabaseMove || move.isBookMove) return '';
+    return '${move.openingMoveNote ?? 'This move appears in the database, but the engine does not recommend it. It may be a sideline or a risky opening choice.'} ';
+  }
+
   String _templateByQuality(GameMoveReview move) {
     switch (move.quality) {
       case MoveQuality.checkmate:
@@ -971,6 +1100,8 @@ class _GameReviewPanelState extends State<GameReviewPanel> {
         return 'This move finds the strongest idea in the position.';
       case MoveQuality.excellent:
         return 'This move keeps your position healthy and follows good chess principles.';
+      case MoveQuality.miss:
+        return _missExplanation(move);
       case MoveQuality.good:
         return 'A solid move that maintains the balance.';
       case MoveQuality.inaccuracy:

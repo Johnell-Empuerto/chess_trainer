@@ -6,18 +6,26 @@ import 'package:chess_trainer/core/chess/move.dart';
 import 'package:chess_trainer/features/coach/data/ai_explainer_service.dart';
 import 'package:chess_trainer/features/coach/data/stockfish_coach_service.dart';
 import 'package:chess_trainer/features/coach/domain/move_quality.dart';
+import 'package:chess_trainer/features/explorer/data/opening_explorer_repository.dart';
+import 'package:chess_trainer/features/explorer/domain/explorer_move_stat.dart';
 import 'package:chess_trainer/features/game_review/domain/game_move_review.dart';
 import 'package:chess_trainer/features/game_review/domain/game_review_report.dart';
 import 'package:chess_trainer/features/game_review/domain/training_theme.dart';
 
 class GameReviewService {
+  static const int _bookLookupLimit = 512;
+
   final StockfishCoachService _coachService;
+  final OpeningExplorerRepository? _explorerRepository;
   final AiExplainerService? _aiService;
+  bool _explorerBookLookupUnavailable = false;
 
   GameReviewService({
     required StockfishCoachService coachService,
+    OpeningExplorerRepository? explorerRepository,
     AiExplainerService? aiService,
   })  : _coachService = coachService,
+        _explorerRepository = explorerRepository,
         _aiService = aiService;
 
   Future<GameReviewReport?> reviewGame({
@@ -40,15 +48,19 @@ class GameReviewService {
           moveNode: node,
           openingName: openingName,
         );
+        final bookMatch = await _bookMoveForNode(node);
         final moveNumber = node.moveNumber;
         final playedBy = node.colorName;
-        final evalLoss = _safeEvalLoss(coachReview.evalLoss);
+        final evalLoss = coachReview.playedMatchesBest
+            ? 0.0
+            : _safeEvalLoss(coachReview.evalLoss);
         final evalSwing = _evalSwingForMover(
           evalBefore: coachReview.evalBefore,
           evalAfter: coachReview.evalAfter,
           playedBy: playedBy,
         );
-        final isBookMove = _isBookLikeMove(
+        final isExplorerDatabaseMove = bookMatch != null;
+        final useOpeningTolerance = _useOpeningTolerance(
           plyIndex: i + 1,
           openingName: openingName,
           evalLoss: evalLoss,
@@ -57,10 +69,32 @@ class GameReviewService {
         final quality = _qualityForGameReview(
           coachReview.quality,
           evalLoss: evalLoss,
-          isBookMove: isBookMove,
+          isExplorerDatabaseMove: isExplorerDatabaseMove,
+          useOpeningTolerance: useOpeningTolerance,
           hasMateScore: coachReview.hasMateScore,
           isMateBlunder: coachReview.isMateBlunder,
           isCheckmateMove: coachReview.isCheckmateMove,
+          playedMatchesBest: coachReview.playedMatchesBest,
+          isMiss: coachReview.isMiss,
+          evalBefore: coachReview.evalBefore,
+          evalAfter: coachReview.evalAfter,
+          playedBy: playedBy,
+        );
+        final isMiss = coachReview.isMiss || quality == MoveQuality.miss;
+        final isBookMove = _shouldDisplayBookMove(
+          isExplorerDatabaseMove: isExplorerDatabaseMove,
+          evalLoss: evalLoss,
+          quality: quality,
+          isMateBlunder: coachReview.isMateBlunder,
+          isCheckmateMove: coachReview.isCheckmateMove,
+          isMiss: isMiss,
+        );
+        final openingMoveNote = _openingMoveNote(
+          isBookMove: isBookMove,
+          isExplorerDatabaseMove: isExplorerDatabaseMove,
+          quality: quality,
+          bestMoveSan: coachReview.bestMoveSan,
+          bestMoveUci: coachReview.bestMoveUci,
         );
 
         gameMoves.add(GameMoveReview(
@@ -79,13 +113,20 @@ class GameReviewService {
           pvLine: coachReview.pvLine,
           openingName: coachReview.openingName,
           isBookMove: isBookMove,
-          openingMoveNote: isBookMove
-              ? 'This is playable opening theory, even if Stockfish slightly prefers another move.'
-              : null,
+          isDatabaseMove: isExplorerDatabaseMove,
+          bookMoveSource: bookMatch?.source,
+          bookMoveGames: bookMatch?.stat.gamesCount,
+          bookMoveWhiteWinRate: bookMatch?.stat.whiteWinRate,
+          bookMoveDrawRate: bookMatch?.stat.drawRate,
+          bookMoveBlackWinRate: bookMatch?.stat.blackWinRate,
+          openingMoveNote: openingMoveNote,
           hasMateScore: coachReview.hasMateScore,
           isMateBlunder: coachReview.isMateBlunder,
           isCheckmateMove: coachReview.isCheckmateMove,
           mateDescription: coachReview.mateDescription,
+          playedMatchesBest: coachReview.playedMatchesBest,
+          isMiss: isMiss,
+          missReason: coachReview.missReason,
           evalSwing: evalSwing,
         ));
       } catch (e) {
@@ -145,43 +186,192 @@ class GameReviewService {
         : evalBefore - evalAfter;
   }
 
-  bool _isBookLikeMove({
+  bool _useOpeningTolerance({
     required int plyIndex,
     required String? openingName,
     required double evalLoss,
     required bool hasMateScore,
   }) {
     if (hasMateScore) return false;
-    if (openingName == null || openingName.trim().isEmpty) return false;
-    return plyIndex <= 10 && evalLoss < 2.5;
+    if (plyIndex <= 10) return evalLoss < 2.5;
+    return openingName != null &&
+        openingName.trim().isNotEmpty &&
+        plyIndex <= 14 &&
+        evalLoss < 2.5;
   }
 
   MoveQuality _qualityForGameReview(
     MoveQuality original, {
     required double evalLoss,
-    required bool isBookMove,
+    required bool isExplorerDatabaseMove,
+    required bool useOpeningTolerance,
     required bool hasMateScore,
     required bool isMateBlunder,
     required bool isCheckmateMove,
+    required bool playedMatchesBest,
+    required bool isMiss,
+    required double? evalBefore,
+    required double? evalAfter,
+    required String playedBy,
   }) {
     if (isCheckmateMove || original == MoveQuality.checkmate) {
       return MoveQuality.checkmate;
     }
-    if (isMateBlunder) return MoveQuality.blunder;
-    if (isBookMove) {
+    if (playedMatchesBest) {
+      return original == MoveQuality.brilliant
+          ? MoveQuality.brilliant
+          : MoveQuality.excellent;
+    }
+    final moverEvalBefore = _moverEval(evalBefore, playedBy);
+    final moverEvalAfter = _moverEval(evalAfter, playedBy);
+    if (isMateBlunder) {
+      return (moverEvalBefore ?? 0) <= -6.0
+          ? MoveQuality.mistake
+          : MoveQuality.blunder;
+    }
+    if (isMiss || original == MoveQuality.miss) return MoveQuality.miss;
+
+    if (isExplorerDatabaseMove) {
+      if (evalLoss >= 4.0) return MoveQuality.blunder;
+      if (evalLoss >= 2.5) return MoveQuality.mistake;
+      if (evalLoss >= 1.2) return MoveQuality.inaccuracy;
+      return original == MoveQuality.brilliant ||
+              original == MoveQuality.excellent
+          ? original
+          : MoveQuality.good;
+    }
+
+    if (useOpeningTolerance) {
       if (evalLoss > 2.5) return MoveQuality.blunder;
       if (evalLoss >= 1.2) return MoveQuality.mistake;
+      if (evalLoss >= 0.6) return MoveQuality.inaccuracy;
       return MoveQuality.good;
     }
 
     if (hasMateScore) return original;
-    if (evalLoss > 2.0) return MoveQuality.blunder;
-    if (evalLoss >= 0.9) return MoveQuality.mistake;
+
+    if (moverEvalBefore != null && moverEvalBefore <= -6.0) {
+      if (evalLoss >= 4.0) return MoveQuality.mistake;
+      if (evalLoss >= 1.5) return MoveQuality.inaccuracy;
+      return MoveQuality.good;
+    }
+
+    if (moverEvalBefore != null && moverEvalBefore <= -3.0) {
+      if (evalLoss >= 4.0) return MoveQuality.mistake;
+      if (evalLoss >= 1.5) return MoveQuality.inaccuracy;
+      return MoveQuality.good;
+    }
+
+    if (moverEvalBefore != null &&
+        moverEvalAfter != null &&
+        moverEvalBefore >= 2.5) {
+      if (moverEvalAfter < 0.5 && evalLoss >= 2.5) {
+        return MoveQuality.blunder;
+      }
+      if (evalLoss >= 1.2) return MoveQuality.mistake;
+      if (evalLoss >= 0.6) return MoveQuality.inaccuracy;
+      return original == MoveQuality.excellent ||
+              original == MoveQuality.brilliant
+          ? original
+          : MoveQuality.good;
+    }
+
+    if (evalLoss >= 2.5) return MoveQuality.blunder;
+    if (evalLoss >= 1.0) return MoveQuality.mistake;
     if (evalLoss >= 0.35) return MoveQuality.inaccuracy;
     return original == MoveQuality.brilliant ||
             original == MoveQuality.excellent
         ? original
         : MoveQuality.good;
+  }
+
+  double? _moverEval(double? eval, String playedBy) {
+    if (eval == null) return null;
+    return playedBy == 'white' ? eval : -eval;
+  }
+
+  Future<_BookMoveMatch?> _bookMoveForNode(MoveNode node) async {
+    final repository = _explorerRepository;
+    if (repository == null || _explorerBookLookupUnavailable) return null;
+
+    try {
+      final explorerMoves = await repository.movesForFen(
+        node.fenBefore,
+        limit: _bookLookupLimit,
+      );
+      if (explorerMoves.isEmpty) return null;
+
+      final playedUci = normalizeUciForCompare(node.uci);
+      if (playedUci.isNotEmpty) {
+        for (final move in explorerMoves) {
+          if (normalizeUciForCompare(move.moveUci) == playedUci) {
+            return _BookMoveMatch(move);
+          }
+        }
+      }
+
+      final playedSan = normalizeSanForCompare(node.san);
+      if (playedSan.isNotEmpty) {
+        for (final move in explorerMoves) {
+          if (normalizeSanForCompare(move.moveSan) == playedSan) {
+            return _BookMoveMatch(move);
+          }
+        }
+      }
+    } catch (error) {
+      _explorerBookLookupUnavailable = true;
+      debugPrint('game review: explorer book lookup unavailable: $error');
+    }
+
+    return null;
+  }
+
+  bool _shouldDisplayBookMove({
+    required bool isExplorerDatabaseMove,
+    required double evalLoss,
+    required MoveQuality quality,
+    required bool isMateBlunder,
+    required bool isCheckmateMove,
+    required bool isMiss,
+  }) {
+    if (!isExplorerDatabaseMove) return false;
+    if (isCheckmateMove || isMateBlunder || isMiss) return false;
+    if (evalLoss >= 1.2) return false;
+
+    return quality == MoveQuality.brilliant ||
+        quality == MoveQuality.excellent ||
+        quality == MoveQuality.good;
+  }
+
+  String? _openingMoveNote({
+    required bool isBookMove,
+    required bool isExplorerDatabaseMove,
+    required MoveQuality quality,
+    required String bestMoveSan,
+    required String bestMoveUci,
+  }) {
+    if (isBookMove) {
+      return 'This is a book opening move. It appears in the explorer database and follows known opening theory.';
+    }
+
+    if (!isExplorerDatabaseMove) return null;
+
+    final bestMove = bestMoveSan.isNotEmpty ? bestMoveSan : bestMoveUci;
+    switch (quality) {
+      case MoveQuality.inaccuracy:
+        return bestMove.isEmpty || bestMove == 'none'
+            ? 'This move exists in the database, but it is not engine-approved. Treat it as a risky sideline rather than the main recommendation.'
+            : 'This move appears in the explorer database, so it has been played before, but the engine prefers $bestMove. Treat it as a risky sideline rather than the main recommendation.';
+      case MoveQuality.mistake:
+      case MoveQuality.blunder:
+        return 'This is a known database move, but it creates a practical problem. The database can show what people play, while Stockfish shows what is best.';
+      case MoveQuality.checkmate:
+      case MoveQuality.miss:
+      case MoveQuality.brilliant:
+      case MoveQuality.excellent:
+      case MoveQuality.good:
+        return null;
+    }
   }
 
   PlayerStats _computeStats(List<GameMoveReview> moves) {
@@ -191,6 +381,7 @@ class GameReviewService {
         bestCount: 0,
         excellentCount: 0,
         goodCount: 0,
+        missCount: 0,
         inaccuracyCount: 0,
         mistakeCount: 0,
         blunderCount: 0,
@@ -202,6 +393,7 @@ class GameReviewService {
     var best = 0,
         excellent = 0,
         good = 0,
+        miss = 0,
         inaccuracy = 0,
         mistake = 0,
         blunder = 0;
@@ -217,6 +409,8 @@ class GameReviewService {
           excellent++;
         case MoveQuality.good:
           good++;
+        case MoveQuality.miss:
+          miss++;
         case MoveQuality.inaccuracy:
           inaccuracy++;
         case MoveQuality.mistake:
@@ -238,6 +432,7 @@ class GameReviewService {
       bestCount: best,
       excellentCount: excellent,
       goodCount: good,
+      missCount: miss,
       inaccuracyCount: inaccuracy,
       mistakeCount: mistake,
       blunderCount: blunder,
@@ -286,10 +481,13 @@ class GameReviewService {
     if (move.isCheckmateMove) return true;
     if (move.isBookMove) return false;
     if (move.isMateBlunder) return true;
+    if (move.isMiss || move.quality == MoveQuality.miss) return true;
     if (move.displayEvalLoss >= 2.0) return true;
 
     switch (move.quality) {
       case MoveQuality.checkmate:
+        return true;
+      case MoveQuality.miss:
         return true;
       case MoveQuality.blunder:
       case MoveQuality.mistake:
@@ -309,6 +507,7 @@ class GameReviewService {
     final qualityWeight = switch (move.quality) {
       MoveQuality.checkmate => 7.0,
       MoveQuality.blunder => 6.0,
+      MoveQuality.miss => 5.5,
       MoveQuality.mistake => 5.0,
       MoveQuality.inaccuracy => 3.0,
       MoveQuality.brilliant => 4.0,
@@ -328,9 +527,11 @@ class GameReviewService {
     final themes = <TrainingTheme>{};
 
     final totalIssues = whiteStats.inaccuracyCount +
+        whiteStats.missCount +
         whiteStats.mistakeCount +
         whiteStats.blunderCount +
         blackStats.inaccuracyCount +
+        blackStats.missCount +
         blackStats.mistakeCount +
         blackStats.blunderCount;
 
@@ -340,6 +541,7 @@ class GameReviewService {
       final last10 = moves.skip(moves.length - 10).toList();
       final endgameIssues = last10
           .where((m) =>
+              m.quality == MoveQuality.miss ||
               m.quality == MoveQuality.mistake ||
               m.quality == MoveQuality.blunder)
           .length;
@@ -350,7 +552,8 @@ class GameReviewService {
     final openingIssues = earlyMoves
         .where((m) =>
             !m.isBookMove &&
-            (m.quality == MoveQuality.inaccuracy ||
+            (m.quality == MoveQuality.miss ||
+                m.quality == MoveQuality.inaccuracy ||
                 m.quality == MoveQuality.mistake))
         .length;
     if (openingIssues >= 2) themes.add(TrainingTheme.opening);
@@ -444,6 +647,7 @@ class GameReviewService {
     final criticalSummary = criticalMoments
         .where((m) =>
             m.quality == MoveQuality.blunder ||
+            m.quality == MoveQuality.miss ||
             m.quality == MoveQuality.mistake ||
             m.quality == MoveQuality.inaccuracy)
         .take(3)
@@ -460,6 +664,7 @@ class GameReviewService {
         .map((m) =>
             'Move ${m.moveNumber} ${m.playedSan} (${m.playedBy}): ${m.quality.label}, ${_lossSummary(m)}')
         .join('\n');
+    final openingDatabaseSummary = _openingDatabaseSummary(gameMoves);
 
     final themesList = themes.map((t) => t.label).join(', ');
     const systemPrompt =
@@ -473,6 +678,7 @@ White accuracy: ${whiteStats.accuracy}%
 Black accuracy: ${blackStats.accuracy}%
 White issues: ${_issueSummary(whiteStats)}
 Black issues: ${_issueSummary(blackStats)}
+Opening database: ${openingDatabaseSummary ?? 'No notable database departure or risky known line.'}
 
 Critical mistakes:
 ${criticalSummary.isEmpty ? 'None' : criticalSummary}
@@ -519,6 +725,8 @@ Rules:
     required List<TrainingTheme> themes,
   }) {
     final criticalMoves = gameMoves.where(_isCriticalMoment).take(3).toList();
+    final openingDatabaseSummary = _openingDatabaseSummary(gameMoves);
+    final overallSummary = _overallSummary(whiteStats, blackStats, openingName);
     final turningPoint = criticalMoves.isEmpty
         ? 'No single move decided the game; both sides mostly kept the balance.'
         : 'Move ${criticalMoves.first.moveNumber} ${criticalMoves.first.playedSan} was the key moment because ${_lossSummary(criticalMoves.first)}.';
@@ -527,7 +735,7 @@ Rules:
         ? 'Review candidate moves before committing.'
         : '${focus.label} - ${focus.description}';
     final coachTemplate = [
-      '1. Overall: ${_overallSummary(whiteStats, blackStats, openingName)}',
+      '1. Overall: $overallSummary${openingDatabaseSummary == null ? '' : ' $openingDatabaseSummary'}',
       '2. Turning point: $turningPoint',
       '3. What White did well: ${_sideStrength("white", gameMoves)}',
       '4. What Black should improve: ${_sideImprovement("black", gameMoves)}',
@@ -580,7 +788,53 @@ Rules:
   }
 
   String _issueSummary(PlayerStats stats) {
-    return '${stats.blunderCount} blunders, ${stats.mistakeCount} mistakes, ${stats.inaccuracyCount} inaccuracies';
+    return '${stats.blunderCount} blunders, ${stats.mistakeCount} mistakes, ${stats.missCount} misses, ${stats.inaccuracyCount} inaccuracies';
+  }
+
+  String? _openingDatabaseSummary(List<GameMoveReview> gameMoves) {
+    final parts = <String>[];
+    GameMoveReview? leftDatabaseMove;
+    var sawInitialDatabaseMove = false;
+
+    for (final move in gameMoves) {
+      if (move.isDatabaseMove) {
+        sawInitialDatabaseMove = true;
+        continue;
+      }
+
+      if (sawInitialDatabaseMove) {
+        leftDatabaseMove = move;
+      }
+      break;
+    }
+
+    if (leftDatabaseMove != null) {
+      parts.add(
+        'The game left the database around move ${_moveMarker(leftDatabaseMove)} ${leftDatabaseMove.playedSan}.',
+      );
+    }
+
+    final hasRiskyKnownLine = gameMoves.any(
+      (move) =>
+          move.isDatabaseMove &&
+          !move.isBookMove &&
+          (move.quality == MoveQuality.inaccuracy ||
+              move.quality == MoveQuality.mistake ||
+              move.quality == MoveQuality.blunder),
+    );
+    if (hasRiskyKnownLine) {
+      parts.add(
+        'Some moves appear in the database but were still inaccurate according to Stockfish.',
+      );
+    }
+
+    return parts.isEmpty ? null : parts.join(' ');
+  }
+
+  String _moveMarker(GameMoveReview move) {
+    return move.playedBy == 'white'
+        ? '${move.moveNumber}.'
+        : '${move.moveNumber}...';
   }
 
   String _lossSummary(GameMoveReview move) {
@@ -589,6 +843,9 @@ Rules:
     }
     if (move.mateDescription != null && move.mateDescription!.isNotEmpty) {
       return move.mateDescription!;
+    }
+    if (move.isMiss || move.quality == MoveQuality.miss) {
+      return move.missReason ?? 'missed a major opportunity';
     }
 
     return 'lost ${move.displayEvalLoss.toStringAsFixed(1)} pawns';
@@ -636,6 +893,7 @@ Rules:
         .where((move) =>
             move.playedBy == side &&
             (move.quality == MoveQuality.blunder ||
+                move.quality == MoveQuality.miss ||
                 move.quality == MoveQuality.mistake ||
                 move.quality == MoveQuality.inaccuracy))
         .toList();
@@ -650,4 +908,11 @@ Rules:
   String _sideName(String side) {
     return side == 'white' ? 'White' : 'Black';
   }
+}
+
+class _BookMoveMatch {
+  final ExplorerMoveStat stat;
+  final String source;
+
+  const _BookMoveMatch(this.stat) : source = 'explorer';
 }
