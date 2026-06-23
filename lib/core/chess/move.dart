@@ -66,6 +66,61 @@ enum MoveColor {
   black,
 }
 
+class MoveNode {
+  static const rootId = 'root';
+
+  final String id;
+  final String? parentId;
+  final List<String> childIds;
+  final String san;
+  final String uci;
+  final String fenBefore;
+  final String fenAfter;
+  final int moveNumber;
+  final MoveColor color;
+  bool isMainLine;
+
+  MoveNode({
+    required this.id,
+    required this.parentId,
+    required this.san,
+    required this.uci,
+    required this.fenBefore,
+    required this.fenAfter,
+    required this.moveNumber,
+    required this.color,
+    required this.isMainLine,
+    List<String>? childIds,
+  }) : childIds = childIds ?? <String>[];
+
+  factory MoveNode.root(String startingFen) {
+    return MoveNode(
+      id: rootId,
+      parentId: null,
+      san: '',
+      uci: '',
+      fenBefore: startingFen,
+      fenAfter: startingFen,
+      moveNumber: 1,
+      color: MoveColor.white,
+      isMainLine: true,
+    );
+  }
+
+  bool get isRoot => id == rootId;
+  bool get isWhiteMove => !isRoot && color == MoveColor.white;
+  bool get isBlackMove => !isRoot && color == MoveColor.black;
+
+  String get colorName {
+    switch (color) {
+      case MoveColor.white:
+        return 'white';
+      case MoveColor.black:
+        return 'black';
+    }
+  }
+}
+
 class MoveRecord {
   final int id;
   final String san;

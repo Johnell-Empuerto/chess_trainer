@@ -18,23 +18,7 @@ migrate_working_dir/
 *.iws
 .idea/
 
-# Large chess engine/database files - keep local only
-stockfish.exe
-stockfish*.exe
-
-chessdatabase/*.pgn
-chessdatabase/*.sqlite
-chessdatabase/*.sqlite-shm
-chessdatabase/*.sqlite-wal
-
-*.pgn
-*.sqlite
-*.sqlite-shm
-*.sqlite-wal
-
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
+# VS Code
 #.vscode/
 
 # Flutter/Dart/Pub related
@@ -53,7 +37,44 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
-# Android Studio will place build artifacts here
+# Android build artifacts
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Large chess engine/database files - keep local only
+stockfish.exe
+stockfish*.exe
+
+chessdatabase/*.pgn
+chessdatabase/*.sqlite
+chessdatabase/*.sqlite-shm
+chessdatabase/*.sqlite-wal
+
+*.pgn
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local AI runtime/model files - keep local only
+ai/
+*.gguf
+*.safetensors
+*.bin
+*.onnx
+
+# llama.cpp local runtime files
+llama*.exe
+llama*.dll
+ggml*.dll
+mtmd.dll
+libomp*.dll
+rpc-server.exe
+
+# Windows release/debug copied runtime files
+build/windows/x64/runner/Debug/ai/
+build/windows/x64/runner/Release/ai/
+build/windows/x64/runner/Debug/stockfish.exe
+build/windows/x64/runner/Release/stockfish.exe
+build/windows/x64/runner/Debug/chessdatabase/
+build/windows/x64/runner/Release/chessdatabase/

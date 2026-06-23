@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import 'package:chess_trainer/core/database/app_database.dart';
+import 'package:chess_trainer/features/computer/domain/computer_level.dart';
 import 'package:chess_trainer/features/engine/domain/engine_analysis_result.dart';
 
 class StockfishEngineException implements Exception {
@@ -31,6 +32,8 @@ class StockfishEngineService {
   Completer<void>? _uciCompleter;
   Completer<void>? _readyCompleter;
   Completer<void>? _stopCompleter;
+  Completer<EngineAnalysisResult>? _directSearchCompleter;
+  int? _directSearchId;
 
   final Map<int, EngineAnalysisLine> _latestLinesByMultiPv = {};
 
@@ -40,6 +43,7 @@ class StockfishEngineService {
   int _nextSearchId = 0;
   int _configuredMultiPv = defaultMultiPv;
   int _suppressedBestMoveCount = 0;
+  bool _computerStrengthConfigured = false;
   bool _engineReady = false;
   bool _searchActive = false;
   bool _disposed = false;
@@ -72,7 +76,7 @@ class StockfishEngineService {
     final searchId = ++_nextSearchId;
 
     unawaited(
-      _enqueueCommand(() async {
+      _enqueueCommand<void>(() async {
         if (_disposed) {
           throw const StockfishEngineException(
               'Stockfish service is disposed.');
@@ -80,6 +84,7 @@ class StockfishEngineService {
 
         await startEngine();
         await _stopActiveSearch(suppressBestMove: true);
+        await _configureAnalysisStrength();
         await _configureMultiPv(multiPv);
 
         _resetLatestAnalysis(fen, searchId);
@@ -88,10 +93,119 @@ class StockfishEngineService {
         debugPrint('sending fen: $fen');
         _send('position fen $fen');
         _send('go depth $depth');
-      }).catchError(_emitEngineError),
+      }),
     );
 
     return searchId;
+  }
+
+  Future<void> setComputerLevel(ComputerLevel level) {
+    return _enqueueCommand<void>(() async {
+      if (_disposed) {
+        throw const StockfishEngineException('Stockfish service is disposed.');
+      }
+
+      await startEngine();
+      await _configureComputerLevel(level);
+    });
+  }
+
+  Future<EngineAnalysisResult> getBestMoveForFen({
+    required String fen,
+    required ComputerLevel level,
+    Duration? movetime,
+    int? depth,
+  }) {
+    final searchId = ++_nextSearchId;
+
+    return _enqueueCommand<EngineAnalysisResult>(() async {
+      if (_disposed) {
+        throw const StockfishEngineException('Stockfish service is disposed.');
+      }
+
+      await startEngine();
+      await _stopActiveSearch(suppressBestMove: true);
+      await _configureComputerLevel(level);
+
+      final completer = Completer<EngineAnalysisResult>();
+      _directSearchCompleter = completer;
+      _directSearchId = searchId;
+      _resetLatestAnalysis(fen, searchId);
+      _searchActive = true;
+
+      debugPrint('sending best-move fen: $fen');
+      _send('position fen $fen');
+      _send(_bestMoveSearchCommand(
+        level: level,
+        movetime: movetime,
+        depth: depth,
+      ));
+
+      return completer.future.timeout(
+        const Duration(seconds: 45),
+        onTimeout: () {
+          if (identical(_directSearchCompleter, completer)) {
+            _directSearchCompleter = null;
+            _directSearchId = null;
+          }
+          unawaited(cancelCurrentSearch());
+          throw const StockfishEngineException(
+            'Stockfish timed out while choosing a move.',
+          );
+        },
+      ).whenComplete(() {
+        if (identical(_directSearchCompleter, completer)) {
+          _directSearchCompleter = null;
+          _directSearchId = null;
+        }
+      });
+    });
+  }
+
+  Future<EngineAnalysisResult> searchPosition(
+    String fen, {
+    int depth = 14,
+  }) {
+    final searchId = ++_nextSearchId;
+
+    return _enqueueCommand<EngineAnalysisResult>(() async {
+      if (_disposed) {
+        throw const StockfishEngineException('Stockfish service is disposed.');
+      }
+
+      await startEngine();
+      await _stopActiveSearch(suppressBestMove: true);
+      await _configureAnalysisStrength();
+      await _configureMultiPv(1);
+
+      final completer = Completer<EngineAnalysisResult>();
+      _directSearchCompleter = completer;
+      _directSearchId = searchId;
+      _resetLatestAnalysis(fen, searchId);
+      _searchActive = true;
+
+      _send('position fen $fen');
+      _send('go depth $depth');
+
+      return completer.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          if (identical(_directSearchCompleter, completer)) {
+            _directSearchCompleter = null;
+            _directSearchId = null;
+          }
+          unawaited(cancelCurrentSearch());
+          throw const StockfishEngineException(
+            'Coach analysis timed out.',
+          );
+        },
+      ).whenComplete(() {
+        if (identical(_directSearchCompleter, completer)) {
+          _directSearchCompleter = null;
+          _directSearchId = null;
+        }
+      });
+    });
   }
 
   Future<EngineAnalysisResult> analyzeFen(
@@ -133,7 +247,20 @@ class StockfishEngineService {
   }
 
   Future<void> cancelCurrentSearch() {
-    return _enqueueCommand(() async {
+    final directSearch = _directSearchCompleter;
+    if (directSearch != null && !directSearch.isCompleted) {
+      try {
+        if (_process != null && _searchActive) {
+          _send('stop');
+        }
+      } catch (error) {
+        debugPrint('engine error: $error');
+      }
+      _completeDirectSearchCanceled();
+      return Future<void>.value();
+    }
+
+    return _enqueueCommand<void>(() async {
       await _stopActiveSearch(suppressBestMove: true);
     });
   }
@@ -190,6 +317,7 @@ class StockfishEngineService {
 
       _send('setoption name MultiPV value $defaultMultiPv');
       _configuredMultiPv = defaultMultiPv;
+      _computerStrengthConfigured = false;
 
       _send('isready');
       await _withTimeout(_readyCompleter!.future, 'isready');
@@ -218,6 +346,43 @@ class StockfishEngineService {
     _readyCompleter = Completer<void>();
     _send('isready');
     await _withTimeout(_readyCompleter!.future, 'multipv isready');
+  }
+
+  Future<void> _configureComputerLevel(ComputerLevel level) async {
+    await _configureMultiPv(1);
+
+    _send('setoption name Skill Level value ${level.skillLevel}');
+    _send('setoption name UCI_LimitStrength value true');
+    _send('setoption name UCI_Elo value ${level.elo}');
+    _readyCompleter = Completer<void>();
+    _send('isready');
+    await _withTimeout(_readyCompleter!.future, 'computer level isready');
+    _computerStrengthConfigured = true;
+  }
+
+  Future<void> _configureAnalysisStrength() async {
+    if (!_computerStrengthConfigured) return;
+
+    _send('setoption name Skill Level value 20');
+    _send('setoption name UCI_LimitStrength value false');
+    _readyCompleter = Completer<void>();
+    _send('isready');
+    await _withTimeout(_readyCompleter!.future, 'analysis strength isready');
+    _computerStrengthConfigured = false;
+  }
+
+  String _bestMoveSearchCommand({
+    required ComputerLevel level,
+    Duration? movetime,
+    int? depth,
+  }) {
+    final depthLimit = depth ?? level.depth;
+    if (depthLimit != null) {
+      return 'go depth $depthLimit';
+    }
+
+    final moveTimeLimit = movetime ?? level.movetime;
+    return 'go movetime ${moveTimeLimit.inMilliseconds}';
   }
 
   Future<void> _stopActiveSearch({required bool suppressBestMove}) async {
@@ -359,7 +524,7 @@ class StockfishEngineService {
 
     if (suppressBestMove) return;
 
-    _publishSnapshot(
+    final result = _publishSnapshot(
       isFinal: true,
       bestMoveOverride: bestMove,
       ponderMoveUci: ponderMove,
@@ -368,15 +533,16 @@ class StockfishEngineService {
         line,
       ].join('\n'),
     );
+    _completeDirectSearch(result);
   }
 
-  void _publishSnapshot({
+  EngineAnalysisResult? _publishSnapshot({
     required bool isFinal,
     String? bestMoveOverride,
     String? ponderMoveUci,
     String? rawSummary,
   }) {
-    if (_analysisController.isClosed || _currentFen.isEmpty) return;
+    if (_analysisController.isClosed || _currentFen.isEmpty) return null;
 
     final result = EngineAnalysisResult.fromLines(
       lines: _latestLinesByMultiPv.values.toList(),
@@ -389,6 +555,7 @@ class StockfishEngineService {
     );
 
     _analysisController.add(result);
+    return result;
   }
 
   void _send(String command) {
@@ -439,9 +606,13 @@ class StockfishEngineService {
     );
   }
 
-  Future<void> _enqueueCommand(Future<void> Function() action) {
+  Future<T> _enqueueCommand<T>(Future<T> Function() action) {
     final operation = _commandQueue.then((_) => action());
-    _commandQueue = operation.catchError(_emitEngineError);
+    _commandQueue = operation.then<void>((_) {}).catchError(
+      (Object error, StackTrace stackTrace) {
+        _emitEngineError(error);
+      },
+    );
     return operation;
   }
 
@@ -451,10 +622,55 @@ class StockfishEngineService {
 
   void _emitEngineError(Object error) {
     debugPrint('engine error: $error');
+    _completeDirectSearchError(error);
 
     if (!_analysisController.isClosed) {
       _analysisController.addError(error);
     }
+  }
+
+  void _completeDirectSearch(EngineAnalysisResult? result) {
+    if (result == null || result.searchId != _directSearchId) return;
+
+    final completer = _directSearchCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(result);
+    }
+  }
+
+  void _completeDirectSearchError(Object error) {
+    final completer = _directSearchCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.completeError(error);
+    }
+    _directSearchCompleter = null;
+    _directSearchId = null;
+  }
+
+  void _completeDirectSearchCanceled() {
+    final completer = _directSearchCompleter;
+    final searchId = _directSearchId ?? _currentSearchId;
+    final fen = _currentFen;
+
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(
+        EngineAnalysisResult(
+          bestMoveUci: 'none',
+          ponderMoveUci: null,
+          evaluationPawns: null,
+          mateIn: null,
+          principalVariation: const [],
+          depth: 0,
+          rawSummary: 'Search canceled.',
+          fen: fen,
+          searchId: searchId,
+          isFinal: true,
+        ),
+      );
+    }
+
+    _directSearchCompleter = null;
+    _directSearchId = null;
   }
 
   void _completeIfPending(Completer<void>? completer) {
@@ -476,6 +692,9 @@ class StockfishEngineService {
     _latestLinesByMultiPv.clear();
 
     if (completePendingAnalysis) {
+      _completeDirectSearchError(
+        const StockfishEngineException('Stockfish search was stopped.'),
+      );
       _completeIfPending(_stopCompleter);
       _completeIfPending(_uciCompleter);
       _completeIfPending(_readyCompleter);

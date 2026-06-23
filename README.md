@@ -1,17 +1,24 @@
 # chess_trainer
 
-A new Flutter project.
+A Flutter-based chess training application with Stockfish analysis, Explorer database, Play vs Computer, and an optional local AI coach.
 
 ## Getting Started
 
-This project is a starting point for a Flutter application.
+## Building for Windows Release
 
-A few resources to get you started if this is your first Flutter project:
+To build a Windows release, run from the project root:
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```powershell
+.\build_windows_release.ps1
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+The script will:
+
+1. Run `flutter build windows`
+2. Copy `stockfish.exe` into the release bundle
+3. Copy the Explorer database (`chessdatabase/explorer_fics_202601.sqlite`)
+4. Copy the `ai/` folder (coach model and llama runner) if present
+5. Copy any required runtime DLLs if present
+6. Verify all expected files and report their status
+
+The app works fully offline. If the `ai/` folder is missing, the Stockfish-based template coach still functions — only the optional AI-generated explanations are unavailable.

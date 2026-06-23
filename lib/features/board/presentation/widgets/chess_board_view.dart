@@ -26,8 +26,11 @@ class ChessBoardView extends StatefulWidget {
   final int? lastMoveTo;
   final String? bestMoveFrom;
   final String? bestMoveTo;
+  final String? hintMoveFrom;
+  final String? hintMoveTo;
   final String? checkedKingSquare;
   final bool isCheckmate;
+  final bool canMovePieces;
   final List<BoardArrow> userArrows;
   final List<BoardCircle> userCircles;
   final Function(int) onSquareTap;
@@ -45,8 +48,11 @@ class ChessBoardView extends StatefulWidget {
     required this.lastMoveTo,
     required this.bestMoveFrom,
     required this.bestMoveTo,
+    required this.hintMoveFrom,
+    required this.hintMoveTo,
     required this.checkedKingSquare,
     required this.isCheckmate,
+    required this.canMovePieces,
     required this.userArrows,
     required this.userCircles,
     required this.onSquareTap,
@@ -212,6 +218,19 @@ class _ChessBoardViewState extends State<ChessBoardView> {
                             fromSquare: widget.bestMoveFrom!,
                             toSquare: widget.bestMoveTo!,
                             flipped: widget.flipped,
+                            color: const Color(0xB8A6E22E),
+                          ),
+                        ),
+                      ),
+                    if (widget.hintMoveFrom != null &&
+                        widget.hintMoveTo != null)
+                      IgnorePointer(
+                        child: CustomPaint(
+                          painter: _BestMoveArrowPainter(
+                            fromSquare: widget.hintMoveFrom!,
+                            toSquare: widget.hintMoveTo!,
+                            flipped: widget.flipped,
+                            color: const Color(0xC05BC0EB),
                           ),
                         ),
                       ),
@@ -245,7 +264,8 @@ class _ChessBoardViewState extends State<ChessBoardView> {
     final isLastMove =
         boardIndex == widget.lastMoveFrom || boardIndex == widget.lastMoveTo;
     final isCheckedKing = checkedKingIndex == boardIndex;
-    final canDragPiece = piece != null &&
+    final canDragPiece = widget.canMovePieces &&
+        piece != null &&
         piece.color == widget.game.turn.displayName.toLowerCase();
 
     final squareContent = _BoardSquare(
@@ -291,6 +311,7 @@ class _ChessBoardViewState extends State<ChessBoardView> {
       height: squareSize,
       child: DragTarget<int>(
         onWillAcceptWithDetails: (details) {
+          if (!widget.canMovePieces) return false;
           final fromSquare = details.data;
           if (fromSquare == boardIndex) return false;
           return true;
@@ -303,7 +324,9 @@ class _ChessBoardViewState extends State<ChessBoardView> {
 
           return GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => widget.onSquareTap(boardIndex),
+            onTap: widget.canMovePieces
+                ? () => widget.onSquareTap(boardIndex)
+                : null,
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -559,11 +582,13 @@ class _BestMoveArrowPainter extends CustomPainter {
   final String fromSquare;
   final String toSquare;
   final bool flipped;
+  final Color color;
 
   const _BestMoveArrowPainter({
     required this.fromSquare,
     required this.toSquare,
     required this.flipped,
+    required this.color,
   });
 
   @override
@@ -594,8 +619,6 @@ class _BestMoveArrowPainter extends CustomPainter {
     final strokeWidth = (squareSize * 0.16).clamp(8.0, 18.0);
     final arrowLength = (squareSize * 0.36).clamp(18.0, 36.0);
     final arrowWidth = arrowLength * 0.64;
-    final color = const Color(0xB8A6E22E);
-
     final linePaint = Paint()
       ..color = color
       ..strokeWidth = strokeWidth
@@ -627,7 +650,8 @@ class _BestMoveArrowPainter extends CustomPainter {
   bool shouldRepaint(covariant _BestMoveArrowPainter oldDelegate) {
     return oldDelegate.fromSquare != fromSquare ||
         oldDelegate.toSquare != toSquare ||
-        oldDelegate.flipped != flipped;
+        oldDelegate.flipped != flipped ||
+        oldDelegate.color != color;
   }
 }
 
