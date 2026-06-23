@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 enum MoveQuality {
+  checkmate,
   brilliant,
   excellent,
   good,
@@ -12,6 +13,8 @@ enum MoveQuality {
 extension MoveQualityLabel on MoveQuality {
   String get label {
     switch (this) {
+      case MoveQuality.checkmate:
+        return 'Checkmate';
       case MoveQuality.brilliant:
         return 'Brilliant';
       case MoveQuality.excellent:
@@ -29,6 +32,8 @@ extension MoveQualityLabel on MoveQuality {
 
   Color get color {
     switch (this) {
+      case MoveQuality.checkmate:
+        return const Color(0xFFB78CFF);
       case MoveQuality.brilliant:
         return const Color(0xFF8B5CF6);
       case MoveQuality.excellent:
@@ -46,6 +51,8 @@ extension MoveQualityLabel on MoveQuality {
 
   String get icon {
     switch (this) {
+      case MoveQuality.checkmate:
+        return '#';
       case MoveQuality.brilliant:
         return '!!';
       case MoveQuality.excellent:

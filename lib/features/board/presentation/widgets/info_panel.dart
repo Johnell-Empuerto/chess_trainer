@@ -3,8 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:chess_trainer/app/app_theme.dart';
 import 'package:chess_trainer/core/chess/game.dart';
 import 'package:chess_trainer/core/chess/move.dart';
+import 'package:chess_trainer/features/board/domain/board_annotation.dart';
+import 'package:chess_trainer/features/board/presentation/widgets/move_tree_notation.dart';
 import 'package:chess_trainer/features/coach/data/ai_explainer_service.dart';
 import 'package:chess_trainer/features/coach/data/stockfish_coach_service.dart';
+import 'package:chess_trainer/features/coach/domain/coach_move_review.dart';
+import 'package:chess_trainer/features/coach/domain/move_quality.dart';
 import 'package:chess_trainer/features/coach/presentation/coach_panel.dart';
 import 'package:chess_trainer/features/computer/domain/computer_level.dart';
 import 'package:chess_trainer/features/computer/domain/computer_play_mode.dart';
@@ -14,10 +18,13 @@ import 'package:chess_trainer/features/engine/presentation/widgets/analysis_line
 import 'package:chess_trainer/features/explorer/data/opening_explorer_repository.dart';
 import 'package:chess_trainer/features/explorer/data/opening_name_service.dart';
 import 'package:chess_trainer/features/explorer/domain/explorer_move_stat.dart';
+import 'package:chess_trainer/features/explorer/domain/opening_name.dart';
 import 'package:chess_trainer/features/explorer/presentation/explorer_panel.dart';
-import 'package:chess_trainer/features/board/presentation/widgets/move_tree_notation.dart';
+import 'package:chess_trainer/features/game_review/data/game_review_service.dart';
+import 'package:chess_trainer/features/game_review/domain/game_move_review.dart';
+import 'package:chess_trainer/features/game_review/presentation/game_review_panel.dart';
 
-enum _InfoPanelTab { analysis, explore, review }
+enum _InfoPanelTab { analysis, explore, review, gameReview }
 
 class InfoPanel extends StatefulWidget {
   final Game game;
@@ -54,6 +61,7 @@ class InfoPanel extends StatefulWidget {
   final VoidCallback onShowPlayComputerDialog;
   final VoidCallback onStopComputerGame;
   final VoidCallback onRequestComputerHint;
+  final ValueChanged<BoardReviewOverlay?> onReviewOverlayChanged;
 
   const InfoPanel({
     super.key,
@@ -91,6 +99,7 @@ class InfoPanel extends StatefulWidget {
     required this.onShowPlayComputerDialog,
     required this.onStopComputerGame,
     required this.onRequestComputerHint,
+    required this.onReviewOverlayChanged,
   });
 
   @override
@@ -99,6 +108,10 @@ class InfoPanel extends StatefulWidget {
 
 class _InfoPanelState extends State<InfoPanel> {
   _InfoPanelTab _selectedTab = _InfoPanelTab.analysis;
+  late final GameReviewService _gameReviewService = GameReviewService(
+    coachService: widget.coachService,
+    aiService: widget.aiService,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -118,26 +131,29 @@ class _InfoPanelState extends State<InfoPanel> {
             _PanelTabs(
               selectedTab: _selectedTab,
               onSelected: (tab) {
+                if (tab == _selectedTab) return;
                 setState(() {
                   _selectedTab = tab;
                 });
+                _notifyReviewOverlay(null);
               },
             ),
             const SizedBox(height: 14),
             AnimatedSwitcher(
               duration: const Duration(milliseconds: 180),
-              child: _selectedTab == _InfoPanelTab.analysis
-                  ? _buildAnalysisTab()
-                  : _selectedTab == _InfoPanelTab.explore
-                      ? ExplorerPanel(
-                          key: const ValueKey('explore-tab'),
-                          currentFen: widget.game.fen,
-                          sanMoveHistory: widget.displayedSanMoveHistory,
-                          engineResult: widget.engineResult,
-                          repository: widget.explorerRepository,
-                          onMoveSelected: widget.onExplorerMoveSelected,
-                        )
-                      : _buildReviewTab(),
+              child: switch (_selectedTab) {
+                _InfoPanelTab.analysis => _buildAnalysisTab(),
+                _InfoPanelTab.explore => ExplorerPanel(
+                    key: const ValueKey('explore-tab'),
+                    currentFen: widget.game.fen,
+                    sanMoveHistory: widget.displayedSanMoveHistory,
+                    engineResult: widget.engineResult,
+                    repository: widget.explorerRepository,
+                    onMoveSelected: widget.onExplorerMoveSelected,
+                  ),
+                _InfoPanelTab.review => _buildReviewTab(),
+                _InfoPanelTab.gameReview => _buildGameReviewTab(),
+              },
             ),
           ],
         ),
@@ -415,6 +431,9 @@ class _InfoPanelState extends State<InfoPanel> {
             coachService: widget.coachService,
             aiService: widget.aiService,
             openingName: _resolveOpeningName(node),
+            onReviewChanged: (review) {
+              _notifyReviewOverlay(_overlayForCoachReview(review));
+            },
           )
         else
           Padding(
@@ -432,6 +451,207 @@ class _InfoPanelState extends State<InfoPanel> {
           ),
       ],
     );
+  }
+
+  Widget _buildGameReviewTab() {
+    return FutureBuilder<OpeningName?>(
+      future: widget.openingNameService.matchOpening(
+        currentFen: widget.game.fen,
+        sanMoveHistory: widget.displayedSanMoveHistory,
+      ),
+      builder: (context, snapshot) {
+        final openingName = snapshot.data?.displayName;
+        return GameReviewPanel(
+          key: const ValueKey('game-review-tab'),
+          moveTree: widget.moveTree,
+          mainLineNodeIds: widget.mainLineNodeIds,
+          reviewService: _gameReviewService,
+          currentNodeId: widget.currentNodeId,
+          openingName: openingName,
+          result: _gameResultText(),
+          onMoveSelected: widget.onMoveSelected,
+          onReviewMoveChanged: (move) {
+            _notifyReviewOverlay(_overlayForGameMove(move));
+          },
+        );
+      },
+    );
+  }
+
+  void _notifyReviewOverlay(BoardReviewOverlay? overlay) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      widget.onReviewOverlayChanged(overlay);
+    });
+  }
+
+  BoardReviewOverlay? _overlayForCoachReview(CoachMoveReview? review) {
+    if (review == null || review.hasError) return null;
+
+    return _overlayForReviewedMove(
+      playedUci: review.playedUci,
+      bestMoveUci: review.bestMoveUci,
+      quality: review.quality,
+      isBookMove: false,
+      isCheckmateMove: review.isCheckmateMove,
+    );
+  }
+
+  BoardReviewOverlay? _overlayForGameMove(GameMoveReview? move) {
+    if (move == null) return null;
+
+    return _overlayForReviewedMove(
+      playedUci: _playedUciForMove(move),
+      bestMoveUci: move.bestMoveUci,
+      quality: move.quality,
+      isBookMove: move.isBookMove,
+      isCheckmateMove: move.isCheckmateMove,
+    );
+  }
+
+  String _playedUciForMove(GameMoveReview move) {
+    final node = widget.moveTree[move.nodeId];
+    return node?.uci ?? '';
+  }
+
+  BoardReviewOverlay? _overlayForReviewedMove({
+    required String playedUci,
+    required String bestMoveUci,
+    required MoveQuality quality,
+    required bool isBookMove,
+    required bool isCheckmateMove,
+  }) {
+    if (isBookMove || quality == MoveQuality.good) return null;
+
+    final playedSquares = _uciSquares(playedUci);
+    if (playedSquares == null) return null;
+
+    final annotationType = _annotationTypeForMove(
+      quality: quality,
+      isCheckmateMove: isCheckmateMove,
+    );
+    if (annotationType == null) return null;
+
+    final arrows = <ReviewArrow>[
+      ReviewArrow(
+        fromSquare: playedSquares.$1,
+        toSquare: playedSquares.$2,
+        type: annotationType,
+      ),
+    ];
+    final badges = <ReviewBadge>[
+      ReviewBadge(
+        square: playedSquares.$2,
+        label: _badgeLabelForMove(
+          quality: quality,
+          isCheckmateMove: isCheckmateMove,
+        ),
+        type: annotationType,
+      ),
+    ];
+
+    if (_shouldShowSuggestion(quality, isCheckmateMove)) {
+      final bestSquares = _uciSquares(bestMoveUci);
+      if (bestSquares != null &&
+          (bestSquares.$1 != playedSquares.$1 ||
+              bestSquares.$2 != playedSquares.$2)) {
+        arrows.add(
+          ReviewArrow(
+            fromSquare: bestSquares.$1,
+            toSquare: bestSquares.$2,
+            type: ReviewAnnotationType.suggestion,
+            isSuggestion: true,
+          ),
+        );
+      }
+    }
+
+    return BoardReviewOverlay(arrows: arrows, badges: badges);
+  }
+
+  (String, String)? _uciSquares(String uci) {
+    if (uci.length < 4 || uci == 'none') return null;
+
+    final from = uci.substring(0, 2).toLowerCase();
+    final to = uci.substring(2, 4).toLowerCase();
+    if (!_isSquareName(from) || !_isSquareName(to)) return null;
+    return (from, to);
+  }
+
+  bool _isSquareName(String square) {
+    if (square.length != 2) return false;
+    final file = square.codeUnitAt(0);
+    final rank = square.codeUnitAt(1);
+    return file >= 'a'.codeUnitAt(0) &&
+        file <= 'h'.codeUnitAt(0) &&
+        rank >= '1'.codeUnitAt(0) &&
+        rank <= '8'.codeUnitAt(0);
+  }
+
+  ReviewAnnotationType? _annotationTypeForMove({
+    required MoveQuality quality,
+    required bool isCheckmateMove,
+  }) {
+    if (isCheckmateMove) {
+      return ReviewAnnotationType.checkmate;
+    }
+
+    switch (quality) {
+      case MoveQuality.checkmate:
+        return ReviewAnnotationType.checkmate;
+      case MoveQuality.brilliant:
+        return ReviewAnnotationType.brilliant;
+      case MoveQuality.excellent:
+        return ReviewAnnotationType.good;
+      case MoveQuality.inaccuracy:
+        return ReviewAnnotationType.inaccuracy;
+      case MoveQuality.mistake:
+        return ReviewAnnotationType.mistake;
+      case MoveQuality.blunder:
+        return ReviewAnnotationType.blunder;
+      case MoveQuality.good:
+        return null;
+    }
+  }
+
+  String _badgeLabelForMove({
+    required MoveQuality quality,
+    required bool isCheckmateMove,
+  }) {
+    if (isCheckmateMove) return '#';
+
+    switch (quality) {
+      case MoveQuality.checkmate:
+        return '#';
+      case MoveQuality.brilliant:
+        return '!!';
+      case MoveQuality.excellent:
+        return '!';
+      case MoveQuality.inaccuracy:
+        return '?!';
+      case MoveQuality.mistake:
+        return '?';
+      case MoveQuality.blunder:
+        return '??';
+      case MoveQuality.good:
+        return '';
+    }
+  }
+
+  bool _shouldShowSuggestion(MoveQuality quality, bool isCheckmateMove) {
+    if (isCheckmateMove || quality == MoveQuality.checkmate) return false;
+    return quality == MoveQuality.blunder ||
+        quality == MoveQuality.mistake ||
+        quality == MoveQuality.inaccuracy;
+  }
+
+  String _gameResultText() {
+    if (widget.game.isCheckmate) {
+      final winner = widget.game.turn == Turn.white ? 'Black' : 'White';
+      return '$winner wins by checkmate';
+    }
+    if (widget.game.isStalemate) return 'Draw by stalemate';
+    return '';
   }
 
   String? _resolveOpeningName(MoveNode node) {
@@ -498,6 +718,15 @@ class _PanelTabs extends StatelessWidget {
               label: 'Review',
               selected: selectedTab == _InfoPanelTab.review,
               onTap: () => onSelected(_InfoPanelTab.review),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: _PanelTabButton(
+              icon: Icons.assignment,
+              label: 'Game',
+              selected: selectedTab == _InfoPanelTab.gameReview,
+              onTap: () => onSelected(_InfoPanelTab.gameReview),
             ),
           ),
         ],

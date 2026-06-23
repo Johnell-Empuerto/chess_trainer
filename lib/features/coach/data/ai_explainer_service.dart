@@ -261,6 +261,24 @@ class AiExplainerService {
     }
   }
 
+  Future<String?> generateExplanationRaw(
+    String prompt, {
+    String? systemPrompt,
+  }) async {
+    if (!isAvailable) return null;
+
+    try {
+      final result = await _sendRawRequest(
+        prompt,
+        systemPrompt: systemPrompt,
+      );
+      return result;
+    } catch (error) {
+      debugPrint('AI explainer: raw generation error -> $error');
+      return null;
+    }
+  }
+
   bool _isValidAiOutput(String? text) {
     if (text == null || text.trim().isEmpty) return false;
 
@@ -311,6 +329,9 @@ class AiExplainerService {
               ? 'engine move ${review.bestMoveUci}'
               : 'unknown');
       final pvDisplay = review.pvLine.take(6).join(' ');
+      final mateInfo = review.mateDescription == null
+          ? ''
+          : 'Mate note: ${review.mateDescription}\n';
 
       final userContent = '''
 Position review:
@@ -321,6 +342,7 @@ Eval after: ${review.evalAfter?.toStringAsFixed(1) ?? 'unknown'}
 Eval loss: ${review.evalLoss?.toStringAsFixed(1) ?? 'unknown'}
 Best move: $bestMoveDisplay
 Principal variation: $pvDisplay
+${mateInfo}
 ${openingInfo}Short engine reason: ${review.fallbackExplanation}
 '''
           .trim();
@@ -330,7 +352,7 @@ ${openingInfo}Short engine reason: ${review.fallbackExplanation}
           {
             'role': 'system',
             'content':
-                'You are a friendly chess trainer, not a statistics reader. Teach the player using ONLY the Stockfish facts provided. Do not invent moves or engine lines. Do not repeat the raw facts as a list. Explain the move in natural language. Say clearly why the played move is good or bad. Explain what the best move tries to do. Give one simple lesson for the player. Keep it short, practical, and beginner-friendly. Use chess language like development, king safety, center control, loose pieces, tactics, tempo, material, and initiative only when relevant.',
+                'You are a friendly chess trainer, not a statistics reader. Teach the player using ONLY the Stockfish facts provided. Do not invent moves or engine lines. Do not repeat the raw facts as a list. Explain the move in natural language. Say clearly why the played move is good or bad. If the move quality is checkmate, say the played move ends the game and do not describe it as a mistake or recommend another continuation. Otherwise, explain what the best move tries to do. Give one simple lesson for the player. Keep it short, practical, and beginner-friendly. Use chess language like development, king safety, center control, loose pieces, tactics, tempo, material, and initiative only when relevant.',
           },
           {
             'role': 'user',
@@ -386,6 +408,87 @@ ${openingInfo}Short engine reason: ${review.fallbackExplanation}
       }
     } catch (error) {
       debugPrint('AI explainer: request error -> $error');
+      return null;
+    }
+  }
+
+  Future<String?> _sendRawRequest(
+    String prompt, {
+    String? systemPrompt,
+  }) async {
+    try {
+      final client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 5);
+
+      final request = await client.post(
+        _serverHost,
+        _serverPort,
+        '/v1/chat/completions',
+      );
+
+      request.headers.contentType = ContentType.json;
+
+      final body = jsonEncode({
+        'messages': [
+          {
+            'role': 'system',
+            'content': systemPrompt ??
+                'You are a friendly chess coach. Use only the provided facts. Do not invent analysis.',
+          },
+          {
+            'role': 'user',
+            'content': prompt,
+          },
+        ],
+        'max_tokens': 400,
+        'temperature': 0.7,
+      });
+
+      request.write(body);
+
+      final response = await request.close().timeout(_requestTimeout);
+      final responseBody =
+          await response.transform(systemEncoding.decoder).join();
+      client.close();
+
+      debugPrint('AI explainer: raw HTTP ${response.statusCode}');
+
+      if (response.statusCode != 200) {
+        debugPrint('AI explainer: non-200 status -> $responseBody');
+        return null;
+      }
+
+      try {
+        final data = jsonDecode(responseBody) as Map<String, dynamic>;
+        final choices = data['choices'] as List?;
+
+        if (choices == null || choices.isEmpty) {
+          debugPrint('AI explainer: no choices in raw response');
+          return null;
+        }
+
+        final firstChoice = choices[0] as Map<String, dynamic>;
+        final message = firstChoice['message'] as Map<String, dynamic>?;
+
+        if (message == null) {
+          debugPrint('AI explainer: no message in raw choice');
+          return null;
+        }
+
+        final content = message['content'] as String?;
+        if (content == null || content.trim().isEmpty) {
+          debugPrint('AI explainer: empty raw content');
+          return null;
+        }
+
+        return content.trim();
+      } catch (e) {
+        debugPrint('AI explainer: raw response parse failed: $e');
+        debugPrint('AI explainer: raw response body: $responseBody');
+        return null;
+      }
+    } catch (error) {
+      debugPrint('AI explainer: raw request error -> $error');
       return null;
     }
   }

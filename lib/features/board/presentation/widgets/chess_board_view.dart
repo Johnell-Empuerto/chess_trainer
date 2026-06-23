@@ -33,6 +33,7 @@ class ChessBoardView extends StatefulWidget {
   final bool canMovePieces;
   final List<BoardArrow> userArrows;
   final List<BoardCircle> userCircles;
+  final BoardReviewOverlay reviewOverlay;
   final Function(int) onSquareTap;
   final void Function(int fromSquare, int toSquare) onPieceDropped;
   final void Function(String fromSquare, String toSquare) onUserArrowDrawn;
@@ -55,6 +56,7 @@ class ChessBoardView extends StatefulWidget {
     required this.canMovePieces,
     required this.userArrows,
     required this.userCircles,
+    required this.reviewOverlay,
     required this.onSquareTap,
     required this.onPieceDropped,
     required this.onUserArrowDrawn,
@@ -210,6 +212,15 @@ class _ChessBoardViewState extends State<ChessBoardView> {
                         ),
                       ),
                     ),
+                    if (!widget.reviewOverlay.isEmpty)
+                      IgnorePointer(
+                        child: CustomPaint(
+                          painter: _ReviewOverlayPainter(
+                            overlay: widget.reviewOverlay,
+                            flipped: widget.flipped,
+                          ),
+                        ),
+                      ),
                     if (widget.bestMoveFrom != null &&
                         widget.bestMoveTo != null)
                       IgnorePointer(
@@ -575,6 +586,166 @@ class _BoardAnnotationPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _BoardAnnotationPainter oldDelegate) {
     return true;
+  }
+}
+
+class _ReviewOverlayPainter extends CustomPainter {
+  final BoardReviewOverlay overlay;
+  final bool flipped;
+
+  const _ReviewOverlayPainter({
+    required this.overlay,
+    required this.flipped,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final squareSize = size.shortestSide / 8;
+
+    for (final arrow in overlay.arrows) {
+      final from = _centerForSquare(arrow.fromSquare, size);
+      final to = _centerForSquare(arrow.toSquare, size);
+      if (from == null || to == null) continue;
+
+      _drawArrow(
+        canvas,
+        from,
+        to,
+        squareSize,
+        arrow.color,
+        isSuggestion: arrow.isSuggestion,
+      );
+    }
+
+    for (final badge in overlay.badges) {
+      final center = _centerForSquare(badge.square, size);
+      if (center == null) continue;
+      _drawBadge(canvas, center, squareSize, badge);
+    }
+  }
+
+  Offset? _centerForSquare(String square, Size size) {
+    final visualIndex = ChessBoardView.squareNameToVisualIndex(
+      square,
+      flipped,
+    );
+    if (visualIndex == null) return null;
+
+    return ChessBoardView.visualIndexToCenterOffset(visualIndex, size);
+  }
+
+  void _drawArrow(
+    Canvas canvas,
+    Offset from,
+    Offset to,
+    double squareSize,
+    Color color, {
+    required bool isSuggestion,
+  }) {
+    final vector = to - from;
+    final distance = vector.distance;
+
+    if (distance <= squareSize * 0.2) return;
+
+    final direction = vector / distance;
+    final start = from + direction * (squareSize * 0.18);
+    final tip = to - direction * (squareSize * 0.15);
+    final lineEnd = tip - direction * (squareSize * 0.18);
+    final perpendicular = Offset(-direction.dy, direction.dx);
+    final strokeWidth =
+        (squareSize * (isSuggestion ? 0.12 : 0.15)).clamp(7.0, 17.0).toDouble();
+    final arrowLength = (squareSize * 0.34).clamp(17.0, 34.0).toDouble();
+    final arrowWidth = arrowLength * 0.64;
+
+    final linePaint = Paint()
+      ..color = color
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+
+    canvas.drawLine(start, lineEnd, linePaint);
+
+    final arrowPath = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(
+        tip.dx - direction.dx * arrowLength + perpendicular.dx * arrowWidth,
+        tip.dy - direction.dy * arrowLength + perpendicular.dy * arrowWidth,
+      )
+      ..lineTo(
+        tip.dx - direction.dx * arrowLength - perpendicular.dx * arrowWidth,
+        tip.dy - direction.dy * arrowLength - perpendicular.dy * arrowWidth,
+      )
+      ..close();
+
+    final headPaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+
+    canvas.drawPath(arrowPath, headPaint);
+  }
+
+  void _drawBadge(
+    Canvas canvas,
+    Offset squareCenter,
+    double squareSize,
+    ReviewBadge badge,
+  ) {
+    final badgeWidth = (squareSize * 0.43).clamp(24.0, 38.0).toDouble();
+    final badgeHeight = (squareSize * 0.32).clamp(18.0, 30.0).toDouble();
+    final badgeCenter =
+        squareCenter + Offset(squareSize * 0.24, -squareSize * 0.24);
+    final rect = Rect.fromCenter(
+      center: badgeCenter,
+      width: badgeWidth,
+      height: badgeHeight,
+    );
+    final rrect = RRect.fromRectAndRadius(
+      rect,
+      Radius.circular(badgeHeight * 0.44),
+    );
+
+    final shadowPaint = Paint()
+      ..color = const Color(0x88000000)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3);
+    canvas.drawRRect(rrect.shift(const Offset(0, 1.5)), shadowPaint);
+
+    final fillPaint = Paint()
+      ..color = badge.color
+      ..style = PaintingStyle.fill;
+    final strokePaint = Paint()
+      ..color = Colors.white.withAlpha(190)
+      ..strokeWidth = 1.1
+      ..style = PaintingStyle.stroke;
+
+    canvas.drawRRect(rrect, fillPaint);
+    canvas.drawRRect(rrect, strokePaint);
+
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: badge.label,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: (squareSize * 0.17).clamp(11.0, 17.0).toDouble(),
+          fontWeight: FontWeight.w900,
+          height: 1,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.center,
+    )..layout(maxWidth: badgeWidth);
+
+    textPainter.paint(
+      canvas,
+      Offset(
+        rect.center.dx - textPainter.width / 2,
+        rect.center.dy - textPainter.height / 2,
+      ),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _ReviewOverlayPainter oldDelegate) {
+    return oldDelegate.overlay != overlay || oldDelegate.flipped != flipped;
   }
 }
 

@@ -17,6 +17,11 @@ class CoachMoveReview {
   final String? aiExplanation;
   final String fallbackExplanation;
   final bool aiAvailable;
+  final bool hasMateScore;
+  final bool isMateBlunder;
+  final bool isCheckmateMove;
+  final String? mateDescription;
+  final bool isOpeningPhase;
   final String? error;
 
   const CoachMoveReview({
@@ -36,6 +41,11 @@ class CoachMoveReview {
     this.aiExplanation,
     required this.fallbackExplanation,
     this.aiAvailable = false,
+    this.hasMateScore = false,
+    this.isMateBlunder = false,
+    this.isCheckmateMove = false,
+    this.mateDescription,
+    this.isOpeningPhase = false,
     this.error,
   });
 

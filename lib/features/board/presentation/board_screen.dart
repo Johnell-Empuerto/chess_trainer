@@ -47,6 +47,7 @@ class _BoardScreenState extends State<BoardScreen> {
   };
   final List<BoardArrow> _userArrows = [];
   final List<BoardCircle> _userCircles = [];
+  BoardReviewOverlay _reviewOverlay = const BoardReviewOverlay.empty();
   bool _flipped = false;
   int? _selectedSquare;
   List<int> _legalTargets = [];
@@ -299,6 +300,7 @@ class _BoardScreenState extends State<BoardScreen> {
     setState(() {
       _clearPositionAnalysis();
       _clearHintInState();
+      _clearReviewOverlayInState();
       _commitPlayedMove(
         san: san,
         uci: uci,
@@ -345,6 +347,7 @@ class _BoardScreenState extends State<BoardScreen> {
       setState(() {
         _clearPositionAnalysis();
         _clearHintInState();
+        _clearReviewOverlayInState();
         _commitPlayedMove(
           san: san,
           uci: moveStat.moveUci,
@@ -373,6 +376,7 @@ class _BoardScreenState extends State<BoardScreen> {
     setState(() {
       _clearPositionAnalysis();
       _stopComputerGameInState();
+      _clearReviewOverlayInState();
       _game = Game.initial();
       _moveTree
         ..clear()
@@ -587,6 +591,7 @@ class _BoardScreenState extends State<BoardScreen> {
     setState(() {
       _clearPositionAnalysis();
       _clearHintInState();
+      _clearReviewOverlayInState();
       _commitPlayedMove(
         san: san,
         uci: uci,
@@ -793,6 +798,7 @@ class _BoardScreenState extends State<BoardScreen> {
     setState(() {
       _clearPositionAnalysis();
       _clearHintInState();
+      _clearReviewOverlayInState();
       if (pausesComputerSearch) {
         _computerRequestId++;
         _computerThinking = false;
@@ -1076,6 +1082,18 @@ class _BoardScreenState extends State<BoardScreen> {
     }
   }
 
+  void _setReviewOverlay(BoardReviewOverlay? overlay) {
+    if (!mounted) return;
+
+    setState(() {
+      _reviewOverlay = overlay ?? const BoardReviewOverlay.empty();
+    });
+  }
+
+  void _clearReviewOverlayInState() {
+    _reviewOverlay = const BoardReviewOverlay.empty();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Focus(
@@ -1161,6 +1179,7 @@ class _BoardScreenState extends State<BoardScreen> {
                           onShowPlayComputerDialog: _showPlayComputerDialog,
                           onStopComputerGame: _stopComputerGame,
                           onRequestComputerHint: _requestComputerHint,
+                          onReviewOverlayChanged: _setReviewOverlay,
                         ),
                       ),
                     ),
@@ -1210,6 +1229,7 @@ class _BoardScreenState extends State<BoardScreen> {
                         onShowPlayComputerDialog: _showPlayComputerDialog,
                         onStopComputerGame: _stopComputerGame,
                         onRequestComputerHint: _requestComputerHint,
+                        onReviewOverlayChanged: _setReviewOverlay,
                       ),
                     ],
                   ),
@@ -1239,6 +1259,7 @@ class _BoardScreenState extends State<BoardScreen> {
       isCheckmate: _game.isCheckmate,
       userArrows: _userArrows,
       userCircles: _userCircles,
+      reviewOverlay: _reviewOverlay,
       onSquareTap: _onSquareTap,
       onPieceDropped: _onPieceDropped,
       onUserArrowDrawn: _toggleUserArrow,

@@ -14,6 +14,7 @@ class CoachPanel extends StatefulWidget {
   final StockfishCoachService coachService;
   final AiExplainerService? aiService;
   final String? openingName;
+  final ValueChanged<CoachMoveReview?>? onReviewChanged;
 
   const CoachPanel({
     super.key,
@@ -21,6 +22,7 @@ class CoachPanel extends StatefulWidget {
     required this.coachService,
     this.aiService,
     this.openingName,
+    this.onReviewChanged,
   });
 
   @override
@@ -33,6 +35,13 @@ class _CoachPanelState extends State<CoachPanel> {
   String? _error;
   String? _aiExplanation;
   bool _generatingAi = false;
+  int _analysisRequestId = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _notifyReviewChanged(null);
+  }
 
   @override
   void didUpdateWidget(CoachPanel oldWidget) {
@@ -43,18 +52,23 @@ class _CoachPanelState extends State<CoachPanel> {
       _aiExplanation = null;
       _loading = false;
       _generatingAi = false;
+      _analysisRequestId++;
+      _notifyReviewChanged(null);
     }
   }
 
   Future<void> _analyze() async {
     final node = widget.moveNode;
     if (node == null || node.isRoot || _loading) return;
+    final requestId = ++_analysisRequestId;
+    final nodeId = node.id;
 
     setState(() {
       _loading = true;
       _error = null;
       _aiExplanation = null;
     });
+    _notifyReviewChanged(null);
 
     try {
       final result = await widget.coachService.reviewMove(
@@ -62,23 +76,33 @@ class _CoachPanelState extends State<CoachPanel> {
         openingName: widget.openingName,
       );
 
-      if (!mounted) return;
+      if (!mounted ||
+          requestId != _analysisRequestId ||
+          widget.moveNode?.id != nodeId) {
+        return;
+      }
 
       setState(() {
         _review = result;
         _loading = false;
         _error = result.hasError ? result.error : null;
       });
+      _notifyReviewChanged(result.hasError ? null : result);
 
       if (!result.hasError) {
         unawaited(_autoGenerateAiExplanation(result));
       }
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted ||
+          requestId != _analysisRequestId ||
+          widget.moveNode?.id != nodeId) {
+        return;
+      }
       setState(() {
         _loading = false;
         _error = e.toString();
       });
+      _notifyReviewChanged(null);
     }
   }
 
@@ -207,8 +231,8 @@ class _CoachPanelState extends State<CoachPanel> {
           _QualityBadge(quality: _review!.quality),
           const SizedBox(height: 12),
           _DetailRow(label: 'Move', value: _review!.playedSan),
-          if (_review!.bestMoveUci.isNotEmpty)
-            _DetailRow(label: 'Best move', value: _review!.bestMoveUci),
+          if (_bestMoveDisplay(_review!).isNotEmpty)
+            _DetailRow(label: 'Best move', value: _bestMoveDisplay(_review!)),
           if (_review!.evalBefore != null)
             _DetailRow(
               label: 'Eval before',
@@ -219,7 +243,12 @@ class _CoachPanelState extends State<CoachPanel> {
               label: 'Eval after',
               value: _formatEval(_review!.evalAfter!),
             ),
-          if (_review!.evalLoss != null && _review!.evalLoss! > 0.01)
+          if (_review!.mateDescription != null &&
+              _review!.mateDescription!.isNotEmpty)
+            _DetailRow(label: 'Mate note', value: _review!.mateDescription!)
+          else if (!_review!.isCheckmateMove &&
+              _review!.evalLoss != null &&
+              _review!.evalLoss! > 0.01)
             _DetailRow(
               label: 'Eval loss',
               value: '${_review!.evalLoss!.toStringAsFixed(2)} pawns',
@@ -253,6 +282,18 @@ class _CoachPanelState extends State<CoachPanel> {
   String _formatEval(double eval) {
     final sign = eval > 0 ? '+' : '';
     return '$sign${eval.toStringAsFixed(2)}';
+  }
+
+  String _bestMoveDisplay(CoachMoveReview review) {
+    if (review.bestMoveSan.isNotEmpty) return review.bestMoveSan;
+    return review.bestMoveUci;
+  }
+
+  void _notifyReviewChanged(CoachMoveReview? review) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      widget.onReviewChanged?.call(review);
+    });
   }
 }
 
