@@ -106,7 +106,6 @@ class AiExplainerService {
         missing.add(fileName);
       }
     }
-
     return missing;
   }
 
@@ -160,7 +159,6 @@ class AiExplainerService {
           debugPrint('AI explainer: port check parse failed: $e');
         }
       }
-
       return false;
     } catch (_) {
       return false;
@@ -255,11 +253,38 @@ class AiExplainerService {
 
     try {
       final result = await _sendChatRequest(review);
+      if (!_isValidAiOutput(result)) return null;
       return result;
     } catch (error) {
       debugPrint('AI explainer: generation error -> $error');
       return null;
     }
+  }
+
+  bool _isValidAiOutput(String? text) {
+    if (text == null || text.trim().isEmpty) return false;
+
+    final lower = text.toLowerCase();
+    final rawFactMarkers = [
+      'played move:',
+      'move quality:',
+      'eval before:',
+      'eval after:',
+      'eval loss:',
+      'stockfish best move:',
+      'stockfish pv:',
+      'short engine reason:',
+      'principal variation:',
+    ];
+
+    var matchCount = 0;
+    for (final marker in rawFactMarkers) {
+      if (lower.contains(marker)) {
+        matchCount++;
+      }
+    }
+
+    return matchCount < 2;
   }
 
   Future<String?> _sendChatRequest(CoachMoveReview review) async {
@@ -278,18 +303,25 @@ class AiExplainerService {
       final qualityLabel = review.quality.label.toLowerCase();
       final openingInfo =
           review.openingName != null && review.openingName!.isNotEmpty
-              ? 'Opening: ${review.openingName}\n'
+              ? 'Opening name: ${review.openingName}\n'
               : '';
+      final bestMoveDisplay = review.bestMoveSan.isNotEmpty
+          ? review.bestMoveSan
+          : (review.bestMoveUci.isNotEmpty
+              ? 'engine move ${review.bestMoveUci}'
+              : 'unknown');
+      final pvDisplay = review.pvLine.take(6).join(' ');
 
       final userContent = '''
-Played move: ${review.playedSan} (${review.playedUci})
+Position review:
+Played move: ${review.playedSan}
 Move quality: $qualityLabel
 Eval before: ${review.evalBefore?.toStringAsFixed(1) ?? 'unknown'}
 Eval after: ${review.evalAfter?.toStringAsFixed(1) ?? 'unknown'}
-Eval loss: ${review.evalLoss?.toStringAsFixed(1) ?? 'unknown'} pawns
-Stockfish best move: ${review.bestMoveUci.isNotEmpty ? review.bestMoveUci : 'unknown'}
-Stockfish PV: ${review.pvLine.isNotEmpty ? review.pvLine.take(6).join(' ') : 'none'}
-${openingInfo}Short reason: ${review.fallbackExplanation}
+Eval loss: ${review.evalLoss?.toStringAsFixed(1) ?? 'unknown'}
+Best move: $bestMoveDisplay
+Principal variation: $pvDisplay
+${openingInfo}Short engine reason: ${review.fallbackExplanation}
 '''
           .trim();
 
@@ -298,14 +330,14 @@ ${openingInfo}Short reason: ${review.fallbackExplanation}
           {
             'role': 'system',
             'content':
-                'You are a chess coach. Use only the provided Stockfish facts. Do not invent chess lines. Explain clearly and briefly for a beginner.',
+                'You are a friendly chess trainer, not a statistics reader. Teach the player using ONLY the Stockfish facts provided. Do not invent moves or engine lines. Do not repeat the raw facts as a list. Explain the move in natural language. Say clearly why the played move is good or bad. Explain what the best move tries to do. Give one simple lesson for the player. Keep it short, practical, and beginner-friendly. Use chess language like development, king safety, center control, loose pieces, tactics, tempo, material, and initiative only when relevant.',
           },
           {
             'role': 'user',
             'content': userContent,
           },
         ],
-        'max_tokens': 160,
+        'max_tokens': 300,
         'temperature': 0.7,
       });
 

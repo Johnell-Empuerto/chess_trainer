@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:chess/chess.dart' as rules;
 import 'package:flutter/foundation.dart';
 
 import 'package:chess_trainer/core/chess/move.dart';
@@ -62,20 +63,27 @@ class StockfishCoachService {
           ? (bestEvalAtPosition - playedEvalAfter)
           : (playedEvalAfter - bestEvalAtPosition);
 
+      final bestMoveUci = resultBefore.bestMoveUci;
+      final bestMoveSan = _uciToSan(fenBefore, bestMoveUci);
+      final pvSan = _pvToSan(fenBefore, resultBefore.principalVariation);
+
       final quality = _classifyQuality(
         evalLoss: evalLoss,
-        isBestMove: playedUci == resultBefore.bestMoveUci,
-        bestMoveUci: resultBefore.bestMoveUci,
+        isBestMove: playedUci == bestMoveUci,
+        bestMoveUci: bestMoveUci,
         mateBefore: resultBefore.mateIn,
         mateAfter: resultAfter.mateIn,
       );
 
+      final displayedBestMove =
+          bestMoveSan.isNotEmpty ? bestMoveSan : bestMoveUci;
+
       final fallbackExplanation = _generateFallbackExplanation(
         playedSan: playedSan,
         quality: quality,
-        bestMoveUci: resultBefore.bestMoveUci,
+        bestMoveDisplay: displayedBestMove,
         evalLoss: evalLoss,
-        isBestMove: playedUci == resultBefore.bestMoveUci,
+        isBestMove: playedUci == bestMoveUci,
       );
 
       final review = CoachMoveReview(
@@ -87,8 +95,9 @@ class StockfishCoachService {
         evalAfter: evalAfter,
         evalLoss: math.max(0.0, evalLoss),
         quality: quality,
-        bestMoveUci: resultBefore.bestMoveUci,
-        pvLine: resultBefore.principalVariation,
+        bestMoveUci: bestMoveUci,
+        bestMoveSan: bestMoveSan,
+        pvLine: pvSan,
         depth: resultBefore.depth,
         openingName: openingName,
         fallbackExplanation: fallbackExplanation,
@@ -114,6 +123,78 @@ class StockfishCoachService {
         fallbackExplanation: 'Deeper analysis is needed to review this move.',
         error: error.toString(),
       );
+    }
+  }
+
+  String _uciToSan(String fen, String uci) {
+    if (uci.length < 4) return '';
+    try {
+      final chess = rules.Chess.fromFEN(fen);
+      final from = uci.substring(0, 2);
+      final to = uci.substring(2, 4);
+      final promotion =
+          uci.length >= 5 ? uci.substring(4, 5).toLowerCase() : null;
+
+      final moves = chess.moves({'verbose': true}).cast<Map<String, dynamic>>();
+      for (final move in moves) {
+        if (move['from'] != from || move['to'] != to) continue;
+        if (promotion != null) {
+          final san = move['san'] as String;
+          if (san.contains('=${promotion.toUpperCase()}')) {
+            return san;
+          }
+        } else {
+          return move['san'] as String;
+        }
+      }
+      return '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  List<String> _pvToSan(String fen, List<String> pvUci) {
+    if (pvUci.isEmpty) return [];
+    try {
+      final chess = rules.Chess.fromFEN(fen);
+      final sanList = <String>[];
+      for (final uci in pvUci) {
+        if (uci.length < 4) break;
+        final from = uci.substring(0, 2);
+        final to = uci.substring(2, 4);
+        final promotion =
+            uci.length >= 5 ? uci.substring(4, 5).toLowerCase() : null;
+
+        final moves =
+            chess.moves({'verbose': true}).cast<Map<String, dynamic>>();
+        String? san;
+        for (final move in moves) {
+          if (move['from'] != from || move['to'] != to) continue;
+          if (promotion != null) {
+            final mSan = move['san'] as String;
+            if (mSan.contains('=${promotion.toUpperCase()}')) {
+              san = mSan;
+              break;
+            }
+          } else {
+            san = move['san'] as String;
+            break;
+          }
+        }
+
+        if (san == null) break;
+        sanList.add(san);
+
+        final args = <String, dynamic>{
+          'from': from,
+          'to': to,
+          if (promotion != null) 'promotion': promotion,
+        };
+        chess.move(args);
+      }
+      return sanList;
+    } catch (_) {
+      return pvUci;
     }
   }
 
@@ -169,36 +250,26 @@ class StockfishCoachService {
   String _generateFallbackExplanation({
     required String playedSan,
     required MoveQuality quality,
-    required String bestMoveUci,
+    required String bestMoveDisplay,
     required double evalLoss,
     required bool isBestMove,
   }) {
     switch (quality) {
       case MoveQuality.brilliant:
-        return '$playedSan is a brilliant move! '
-            'Stockfish confirms it is the best move in this position.';
+        return '$playedSan is a brilliant move! It finds the strongest idea in the position and gives you a clear advantage. Keep looking for tactical shots and forcing sequences like this.';
       case MoveQuality.excellent:
-        return '$playedSan is an excellent move. '
-            'It matches or closely follows the top engine recommendation.';
+        return '$playedSan is a strong move. It keeps your position healthy and follows the engine recommendation. The idea is to improve your pieces without creating weaknesses.';
       case MoveQuality.good:
-        return '$playedSan is a solid move. '
-            'It maintains a stable position without significant disadvantage.';
+        return '$playedSan is a solid move. It maintains a stable position without significant disadvantage. Focus on developing pieces and controlling the center.';
       case MoveQuality.inaccuracy:
         final lossPawns = evalLoss.toStringAsFixed(2);
-        return '$playedSan is an inaccuracy '
-            '(eval loss: $lossPawns pawns). '
-            'Consider $bestMoveUci instead, '
-            'which would have given a better position.';
+        return '$playedSan is slightly inaccurate. It does not lose immediately, but $bestMoveDisplay improves your position more. Try to develop pieces, control the center, and avoid moving the same piece too many times early. (eval loss: $lossPawns pawns)';
       case MoveQuality.mistake:
         final lossPawns = evalLoss.toStringAsFixed(2);
-        return '$playedSan is a mistake '
-            '(eval loss: $lossPawns pawns). '
-            'Stockfish recommends $bestMoveUci '
-            'to maintain a stronger position.';
+        return '$playedSan is a mistake. It may look active, but it gives the opponent a stronger response. $bestMoveDisplay was better because it keeps your position stable and follows the engine main line. Before capturing or attacking, check if your piece can be challenged or if your opponent gains tempo. (eval loss: $lossPawns pawns)';
       case MoveQuality.blunder:
-        return '$playedSan is a blunder! '
-            'Stockfish strongly recommends $bestMoveUci '
-            'instead. This move significantly worsened the position.';
+        final lossPawns = evalLoss.toStringAsFixed(2);
+        return '$playedSan is a blunder because it changes the position sharply against you. The better move was $bestMoveDisplay, which keeps the position safer. After $playedSan, your evaluation drops by $lossPawns pawns, meaning you likely lose material, initiative, or king safety.';
     }
   }
 }

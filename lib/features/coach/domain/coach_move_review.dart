@@ -10,6 +10,7 @@ class CoachMoveReview {
   final double? evalLoss;
   final MoveQuality quality;
   final String bestMoveUci;
+  final String bestMoveSan;
   final List<String> pvLine;
   final int depth;
   final String? openingName;
@@ -28,6 +29,7 @@ class CoachMoveReview {
     required this.evalLoss,
     required this.quality,
     required this.bestMoveUci,
+    this.bestMoveSan = '',
     required this.pvLine,
     required this.depth,
     this.openingName,

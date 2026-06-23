@@ -442,7 +442,7 @@ class _ExplanationBox extends StatelessWidget {
                 generating
                     ? 'Generating AI explanation\u2026'
                     : isAiGenerated
-                        ? 'AI Coach'
+                        ? 'AI Coach Explanation'
                         : 'Coach Note',
                 style: TextStyle(
                   color: generating

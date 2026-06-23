@@ -3,7 +3,22 @@ $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ReleaseDir = Join-Path $ProjectRoot 'build\windows\x64\runner\Release'
 
-Write-Host "=== Building Windows Release ===" -ForegroundColor Cyan
+Write-Host "=== Closing running app/AI processes ===" -ForegroundColor Cyan
+
+$processesToStop = @(
+    "chess_trainer",
+    "llama-server",
+    "llama"
+)
+
+foreach ($processName in $processesToStop) {
+    Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "  Closing $($_.ProcessName) PID $($_.Id)" -ForegroundColor Yellow
+        Stop-Process -Id $_.Id -Force
+    }
+}
+
+Start-Sleep -Seconds 1
 
 Push-Location $ProjectRoot
 try {
